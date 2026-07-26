@@ -311,9 +311,6 @@ async def webhook(Body: str = Form(), From: str = Form()):
     return {"status": "ok"}
 
 if __name__ == "__main__":
-    from pyngrok import ngrok
     import uvicorn
-    public_url = ngrok.connect(8000)
-    print(f"Public URL: {public_url}")
-    print("Server starting...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
