@@ -1,4 +1,6 @@
-from bot import _content_to_text, sanitize_whatsapp_response
+from types import SimpleNamespace
+
+from bot import _content_to_text, _current_turn_tool_outputs, sanitize_whatsapp_response
 
 
 def main():
@@ -13,6 +15,17 @@ def main():
     blocks = [{"type": "text", "text": "**Hello**"}, {"type": "text", "text": "World"}]
     normalized = _content_to_text(blocks)
     assert "Hello" in normalized and "World" in normalized
+
+    messages = [
+        SimpleNamespace(type="human", content="Old question"),
+        SimpleNamespace(type="tool", content="Old tool output"),
+        SimpleNamespace(type="ai", content="Old answer"),
+        SimpleNamespace(type="human", content="New question"),
+        SimpleNamespace(type="tool", content="Current tool output"),
+        SimpleNamespace(type="ai", content="Embellished model answer"),
+    ]
+    outputs = _current_turn_tool_outputs(messages)
+    assert outputs == ["Current tool output"]
 
     print("WhatsApp response formatting test passed.")
 
