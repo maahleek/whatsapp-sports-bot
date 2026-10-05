@@ -310,19 +310,29 @@ def search_player(player_name: str) -> str:
             },
             params={"search": player_name},
         )
-        players = data.get("response") or []
+        players = _extract_player_records(data)
         if not players:
             return f"No player found for '{player_name}'."
 
         lines = ["Players found:"]
         for player in players[:5]:
-            if isinstance(player, dict):
-                lines.append(
-                    f"- {player.get('name', 'Unknown')} "
-                    f"({player.get('teamName', 'Unknown team')})"
-                )
+            name = (
+                player.get("name")
+                or player.get("playerName")
+                or player.get("strPlayer")
+                or "Unknown"
+            )
+            team_value = player.get("team")
+            if isinstance(team_value, dict):
+                team = team_value.get("name") or team_value.get("shortName")
             else:
-                lines.append(f"- {player}")
+                team = team_value
+            team = team or player.get("teamName") or player.get("clubName") or "Team unavailable"
+            position = player.get("position") or player.get("strPosition")
+            suffix = f" - {team}"
+            if position:
+                suffix += f" ({position})"
+            lines.append(f"- {name}{suffix}")
         return "\n".join(lines)
     except Exception as exc:
         return f"I couldn't search for that player right now: {exc}"
