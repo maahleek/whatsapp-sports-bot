@@ -1,18 +1,13 @@
-import requests
-import os
-from dotenv import load_dotenv
+from bot import _prediction_probabilities
 
-load_dotenv()
 
-headers = {"X-Auth-Token": os.getenv("FOOTBALL_DATA_KEY")}
+def test_prediction_probabilities_sum_to_one():
+    a, draw, b = _prediction_probabilities(1.8, 1.2)
+    total = a + draw + b
+    assert abs(total - 1.0) < 1e-9
+    assert all(0.0 <= value <= 1.0 for value in (a, draw, b))
 
-response = requests.get(
-    "https://api.football-data.org/v4/competitions/PL/scorers",
-    headers=headers,
-    params={"season": "2025"}
-)
 
-data = response.json()
-scorers = data.get("scorers", [])
-if scorers:
-    print(scorers[0])
+if __name__ == "__main__":
+    test_prediction_probabilities_sum_to_one()
+    print("Prediction probability test passed.")
