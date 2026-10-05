@@ -31,7 +31,7 @@ FastAPI Webhook
      v
 LangGraph ReAct Agent
      |
-     +--> Groq / Llama 3.3 70B
+     +--> Anthropic Claude
      |
      +--> Sports API tools
      |      - TheSportsDB
@@ -59,7 +59,7 @@ WhatsApp User
 - FastAPI
 - LangGraph
 - LangChain
-- Groq / Llama 3.3 70B
+- Anthropic Claude
 - Twilio WhatsApp API
 - ChromaDB
 - HuggingFace sentence-transformers
@@ -170,7 +170,7 @@ See `.env.example`.
 
 Required for the full application:
 
-- `GROQ_API_KEY`
+- `ANTHROPIC_API_KEY`
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `FOOTBALL_DATA_KEY`
@@ -179,7 +179,7 @@ Required for the full application:
 
 Optional:
 
-- `GROQ_MODEL`
+- `ANTHROPIC_MODEL`
 - `TWILIO_WHATSAPP_FROM`
 - `VERIFY_TWILIO_SIGNATURE`
 - `SPORTSDB_API_KEY`
