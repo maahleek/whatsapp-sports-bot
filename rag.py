@@ -26,8 +26,18 @@ def _load_knowledge_text() -> str:
 
 def rebuild_knowledge_base() -> int:
     text = _load_knowledge_text()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=75)
-    chunks = splitter.split_documents([Document(page_content=text)])
+    sections = [
+        section.strip()
+        for section in text.split("\n\n")
+        if section.strip() and section.strip() != "FOOTBALL RULES AND REGULATIONS"
+    ]
+    documents = [Document(page_content=section) for section in sections]
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=320,
+        chunk_overlap=20,
+        separators=["\n\n", "\n", ". ", " "],
+    )
+    chunks = splitter.split_documents(documents)
 
     if VECTOR_DIR.exists():
         shutil.rmtree(VECTOR_DIR)
@@ -57,7 +67,7 @@ def get_vectorstore() -> Chroma:
     )
 
 
-def search_knowledge(question: str, k: int = 2) -> list[str]:
+def search_knowledge(question: str, k: int = 1) -> list[str]:
     if not question.strip():
         return []
 
