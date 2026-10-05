@@ -642,7 +642,7 @@ Rules:
 8. Never invent, infer, reconstruct, or embellish statistics that were not returned by a tool in the current turn. Do not add xG, shot counts, possession, table positions, points, goals, or other metrics unless a current-turn tool explicitly returned them.
 9. Never reuse numeric sports data from conversation memory as if it were current. For standings, results, fixtures, form, injuries, scorers, or stats, current-turn tool output is the only authoritative source.
 10. If a standings tool says the structured table is unavailable, do not build a partial table from web snippets and do not fill missing rows with guesses or dashes.
-11. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on.
+11. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on. Do not describe one or two matches as proof of "good form", "bad form", title contention, or another broad conclusion.
 12. If a tool reports that data is unavailable, say so rather than inventing an answer.
 """.strip()
 
@@ -698,12 +698,44 @@ def sanitize_whatsapp_response(response: str) -> str:
 
     return response
 
+def _current_turn_tool_outputs(messages: list[Any]) -> list[str]:
+    """Return unique tool outputs produced after the most recent user message."""
+    last_human_index = -1
+    for index, message in enumerate(messages):
+        if getattr(message, "type", "") == "human":
+            last_human_index = index
+
+    outputs: list[str] = []
+    seen: set[str] = set()
+    for message in messages[last_human_index + 1:]:
+        if getattr(message, "type", "") != "tool":
+            continue
+
+        text = _content_to_text(getattr(message, "content", "")).strip()
+        if text and text not in seen:
+            outputs.append(text)
+            seen.add(text)
+
+    return outputs
+
+
 def ask_agent(message: str, user_id: str) -> str:
     result = get_agent().invoke(
         {"messages": [{"role": "user", "content": message}]},
         config={"configurable": {"thread_id": f"{MEMORY_NAMESPACE}:{user_id}"}},
     )
-    raw_content = result["messages"][-1].content
+
+    messages = result["messages"]
+    tool_outputs = _current_turn_tool_outputs(messages)
+
+    # For factual/tool-backed requests, return the current turn's grounded tool
+    # results instead of allowing the model to add unsupported statistics or
+    # conclusions. The agent still decides which tools to call and memory still
+    # resolves follow-ups such as "their next fixtures".
+    if tool_outputs:
+        return sanitize_whatsapp_response("\n\n".join(tool_outputs))
+
+    raw_content = messages[-1].content
     return sanitize_whatsapp_response(_content_to_text(raw_content))
 
 
