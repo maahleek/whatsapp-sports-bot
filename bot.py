@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -612,7 +613,8 @@ Rules:
 4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
 5. Use the match-outlook tool when the user asks for a prediction. Clearly present it as an estimate, not a guaranteed result.
 6. Keep WhatsApp responses concise, readable, and conversational.
-7. If a tool reports that data is unavailable, say so rather than inventing an answer.
+7. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
+8. If a tool reports that data is unavailable, say so rather than inventing an answer.
 """.strip()
 
     return create_react_agent(
@@ -623,12 +625,58 @@ Rules:
     )
 
 
+def _content_to_text(content: Any) -> str:
+    """Normalize LangChain/Anthropic message content into plain text."""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if text:
+                    parts.append(str(text))
+                continue
+
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(str(text))
+
+        return "\n".join(parts)
+
+    return str(content)
+
+
+def sanitize_whatsapp_response(response: str) -> str:
+    """Strip model/tool markup and Markdown before sending to WhatsApp."""
+    response = re.sub(
+        r"<function=\\w+>.*?</function>",
+        "",
+        response,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    response = re.sub(r"^\\s*#{1,6}\\s*", "", response, flags=re.MULTILINE)
+    response = response.replace("**", "")
+    response = response.replace("__", "")
+    response = response.replace("*", "")
+    response = response.replace("`", "")
+    response = re.sub(r"\\n{3,}", "\\n\\n", response)
+    response = response.strip()
+
+    if not response:
+        return "Sorry, I couldn\'t process that. Please try again!"
+
+    return response
+
+
 def ask_agent(message: str, user_id: str) -> str:
     result = get_agent().invoke(
         {"messages": [{"role": "user", "content": message}]},
         config={"configurable": {"thread_id": user_id}},
     )
-    return result["messages"][-1].content
+    raw_content = result["messages"][-1].content
+    return sanitize_whatsapp_response(_content_to_text(raw_content))
 
 
 def _send_whatsapp_message(to: str, body: str) -> None:
