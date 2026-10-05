@@ -445,10 +445,14 @@ def get_transfer_news(query: str) -> str:
 
         lines = [f"Latest football news on '{query}':"]
         for item in items:
-            lines.append(
-                f"- {item.get('title', 'Untitled')}\n"
-                f"  {str(item.get('content', ''))[:220]}..."
-            )
+            snippet = _clean_web_snippet(item.get("content"), 180)
+            url = str(item.get("url") or "").strip()
+            entry = f"- {item.get('title', 'Untitled')}"
+            if snippet:
+                entry += f"\n  {snippet}"
+            if url:
+                entry += f"\n  Source: {url}"
+            lines.append(entry)
         return "\n\n".join(lines)
     except Exception as exc:
         return f"I couldn't search the latest football news right now: {exc}"
@@ -573,7 +577,7 @@ def predict_match(team1: str, team2: str) -> str:
 def search_football_knowledge(question: str) -> str:
     """Search the local football rules knowledge base using semantic retrieval."""
     try:
-        passages = search_knowledge(question, k=2)
+        passages = search_knowledge(question, k=1)
         if not passages:
             return "No relevant information was found in the football knowledge base."
         return "From the football knowledge base:\n\n" + "\n\n".join(passages)
