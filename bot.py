@@ -651,24 +651,23 @@ def _content_to_text(content: Any) -> str:
 def sanitize_whatsapp_response(response: str) -> str:
     """Strip model/tool markup and Markdown before sending to WhatsApp."""
     response = re.sub(
-        r"<function=\\w+>.*?</function>",
+        r"<function=\w+>.*?</function>",
         "",
         response,
         flags=re.DOTALL | re.IGNORECASE,
     )
-    response = re.sub(r"^\\s*#{1,6}\\s*", "", response, flags=re.MULTILINE)
+    response = re.sub(r"^\s*#{1,6}\s*", "", response, flags=re.MULTILINE)
     response = response.replace("**", "")
     response = response.replace("__", "")
     response = response.replace("*", "")
     response = response.replace("`", "")
-    response = re.sub(r"\\n{3,}", "\\n\\n", response)
+    response = re.sub(r"\n{3,}", "\n\n", response)
     response = response.strip()
 
     if not response:
         return "Sorry, I couldn\'t process that. Please try again!"
 
     return response
-
 
 def ask_agent(message: str, user_id: str) -> str:
     result = get_agent().invoke(
