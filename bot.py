@@ -2,11 +2,12 @@ import requests
 import os
 from dotenv import load_dotenv
 from langchain.tools import tool
-from langchain_groq import ChatGroq
+from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
 from fastapi import FastAPI, Form
 from twilio.rest import Client
 from langgraph.checkpoint.sqlite import SqliteSaver
+import os
 #from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 #from langchain_huggingface import HuggingFaceEmbeddings
@@ -376,7 +377,7 @@ def get_team_stats(team_name: str) -> str:
         output += f"- {r['title']}\n  {r['content'][:200]}...\n\n"
     return output
 
-model = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+model = ChatAnthropic(model="claude-haiku-4-5", temperature=0, api_key=os.getenv("ANTHROPIC_API_KEY"))
 from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
 
@@ -386,7 +387,7 @@ memory = SqliteSaver(conn)
 agent = create_react_agent(
     model=model,
     tools=[get_team_info, get_recent_results, get_upcoming_fixtures, get_team_players, search_player, get_league_standings, get_live_scores, get_transfer_news, get_top_scorers, get_player_injury, predict_match, get_league_fixtures, get_head_to_head, get_team_form, get_team_stats],
-    prompt="You are a friendly football sports assistant on WhatsApp. STRICT RULES: 1) NEVER show function names, XML tags, or code in your responses - always respond in plain conversational text. 2) For football rules, offside, VAR, cards, penalties - use search_football_knowledge tool first. 3) For team info - use get_team_info. 4) For standings - use get_league_standings. 5) For live scores - use get_live_scores. 6) For transfers/news - use get_transfer_news. 7) For predictions - use predict_match. 8) For player search - use search_player. 9) For top scorers - use get_top_scorers. 10) For injuries - use get_player_injury. 11) ALWAYS use a tool first before answering. 12) Present results in a clean, friendly WhatsApp message format.",
+    prompt="You are a friendly football sports assistant on WhatsApp. STRICT RULES: 1) NEVER show function names, XML tags, or code in your responses - always respond in plain conversational text. 2) NEVER use markdown formatting like **bold**, *italic*, or # headers - WhatsApp does not support markdown, use plain text with emojis only. 3) For football rules, offside, VAR, cards, penalties - use explain_offside or football_dictionary tool. 4) For team info - use get_team_info. 5) For standings - use get_standings_from_db first, fallback to get_league_standings. 6) For live scores - use get_live_scores. 7) For transfers/news - use get_transfer_news or get_transfers. 8) For predictions - use predict_match. 9) For player search - use search_player_from_db first, fallback to search_player. 10) For top scorers - use get_top_scorers_from_db first, fallback to get_top_scorers. 11) For injuries - use get_player_injury. 12) For player stats - use get_player_stats. 13) For manager info - use get_manager_info. 14) For stadium info - use get_stadium_info. 15) For comparing players - use compare_players. 16) For comparing teams - use compare_teams. 17) For World Cup history - use get_world_cup_history. 18) For Ballon d Or history - use get_ballon_dor_history. 19) For team form - use get_team_form. 20) For head to head - use get_head_to_head. 21) For league fixtures - use get_league_fixtures. 22) For top assists - use get_league_top_assists. 23) ALWAYS use a tool first before answering. 24) Present results in a clean friendly WhatsApp message format using emojis.",
     checkpointer=memory,
 )
 
@@ -396,7 +397,24 @@ def ask_agent(message: str, user_id: str) -> str:
         {"messages": [{"role": "user", "content": message}]},
         config=config
     )
-    return result["messages"][-1].content
+    
+    response = result["messages"][-1].content
+    
+    # Clean up function call syntax
+    import re
+    response = re.sub(r'<function=\w+>.*?</function>', '', response, flags=re.DOTALL)
+    response = response.strip()
+    
+    # Remove markdown formatting
+    response = re.sub(r'\*\*(.*?)\*\*', r'\1', response)  # Remove **bold**
+    response = re.sub(r'\*(.*?)\*', r'\1', response)  # Remove *italic*
+    response = re.sub(r'#{1,6}\s', '', response)  # Remove headers
+    response = re.sub(r'`(.*?)`', r'\1', response)  # Remove code
+    
+    if not response:
+        response = "Sorry, I couldn't process that. Please try again!"
+    
+    return response
 
 app = FastAPI()
 
