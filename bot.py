@@ -2,7 +2,9 @@ import math
 import os
 import re
 import sqlite3
+from collections import deque
 from datetime import datetime, timezone
+from threading import Lock
 from functools import lru_cache
 from typing import Any
 
@@ -28,6 +30,11 @@ FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
 VERIFY_TWILIO_SIGNATURE = os.getenv("VERIFY_TWILIO_SIGNATURE", "false").lower() == "true"
 MEMORY_NAMESPACE = os.getenv("MEMORY_NAMESPACE", "v2")
+
+_PROCESSED_MESSAGE_SIDS: set[str] = set()
+_PROCESSED_MESSAGE_ORDER: deque[str] = deque()
+_PROCESSED_MESSAGE_LOCK = Lock()
+_MAX_PROCESSED_MESSAGE_SIDS = 1000
 
 LEAGUE_CODES = {
     "premier league": "PL",
@@ -566,10 +573,12 @@ def get_team_form(team_name: str) -> str:
     """Get a team's last five results in W/D/L form."""
     try:
         summary = _form_summary(team_name)
+        played = int(summary["played"])
+        match_word = "match" if played == 1 else "matches"
         return (
             f"{summary['team']} recent form: "
             f"{summary['wins']}W {summary['draws']}D {summary['losses']}L "
-            f"from the last {summary['played']} matches."
+            f"from the last {played} {match_word}."
         )
     except Exception as exc:
         return f"I couldn't retrieve team form right now: {exc}"
@@ -767,6 +776,25 @@ def process_and_reply(message: str, sender: str) -> None:
         print(f"Twilio send error for {sender}: {exc}")
 
 
+def _mark_message_sid_processed(message_sid: str) -> bool:
+    """Return False for a duplicate Twilio webhook message SID."""
+    if not message_sid:
+        return True
+
+    with _PROCESSED_MESSAGE_LOCK:
+        if message_sid in _PROCESSED_MESSAGE_SIDS:
+            return False
+
+        _PROCESSED_MESSAGE_SIDS.add(message_sid)
+        _PROCESSED_MESSAGE_ORDER.append(message_sid)
+
+        while len(_PROCESSED_MESSAGE_ORDER) > _MAX_PROCESSED_MESSAGE_SIDS:
+            oldest = _PROCESSED_MESSAGE_ORDER.popleft()
+            _PROCESSED_MESSAGE_SIDS.discard(oldest)
+
+    return True
+
+
 def _validate_twilio_request(request: Request, form_data: dict[str, str]) -> bool:
     if not VERIFY_TWILIO_SIGNATURE:
         return True
@@ -798,9 +826,14 @@ async def webhook(
 
     body = form_data.get("Body", "").strip()
     sender = form_data.get("From", "").strip()
+    message_sid = form_data.get("MessageSid", "").strip()
 
     if not body or not sender:
         raise HTTPException(status_code=400, detail="Missing WhatsApp message data.")
+
+    if not _mark_message_sid_processed(message_sid):
+        print(f"Ignoring duplicate Twilio webhook for MessageSid={message_sid}")
+        return Response(status_code=204)
 
     background_tasks.add_task(process_and_reply, body, sender)
     return Response(status_code=204)
