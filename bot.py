@@ -9,7 +9,7 @@ import requests
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from langchain_core.tools import tool
-from langchain_groq import ChatGroq
+from langchain_anthropic import ChatAnthropic
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 from tavily import TavilyClient
@@ -590,10 +590,10 @@ TOOLS = [
 
 @lru_cache(maxsize=1)
 def get_agent():
-    model = ChatGroq(
-        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+    model = ChatAnthropic(
+        model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
         temperature=0,
-        api_key=_require_env("GROQ_API_KEY"),
+        api_key=_require_env("ANTHROPIC_API_KEY"),
     )
 
     connection = sqlite3.connect(
