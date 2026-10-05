@@ -141,6 +141,10 @@ def _form_summary(team_name: str) -> dict[str, float | str | int]:
         "wins": wins,
         "draws": draws,
         "losses": losses,
+        "goals_for": goals_for,
+        "goals_against": goals_against,
+        "goals_for_per_game": goals_for / played,
+        "goals_against_per_game": goals_against / played,
         "points_per_game": points / played,
         "goal_diff_per_game": (goals_for - goals_against) / played,
     }
@@ -283,7 +287,7 @@ def search_player(player_name: str) -> str:
 
 @tool
 def get_league_standings(league_name: str) -> str:
-    """Get current standings for a supported football league."""
+    """Get current standings for a supported football league, with a web-search fallback."""
     code = _league_code(league_name)
     if not code:
         return (
@@ -291,6 +295,7 @@ def get_league_standings(league_name: str) -> str:
             "La Liga, Bundesliga, Serie A, Ligue 1, or Champions League."
         )
 
+    primary_error = None
     try:
         data = _safe_get_json(
             f"{FOOTBALL_DATA_BASE_URL}/competitions/{code}/standings",
@@ -298,19 +303,46 @@ def get_league_standings(league_name: str) -> str:
         )
         standings = data.get("standings") or []
         table = standings[0].get("table", []) if standings else []
-        if not table:
-            return "Standings are not available right now."
+        if table:
+            lines = [f"{league_name.title()} standings (football-data.org):"]
+            for item in table[:10]:
+                lines.append(
+                    f"{item.get('position', '?')}. "
+                    f"{item.get('team', {}).get('name', 'Unknown')} - "
+                    f"{item.get('points', 0)} pts"
+                )
+            return "\n".join(lines)
+        primary_error = "standings table was empty"
+    except Exception as exc:
+        primary_error = str(exc)
 
-        lines = [f"{league_name.title()} standings:"]
-        for item in table[:10]:
+    try:
+        tavily = TavilyClient(api_key=_require_env("TAVILY_API_KEY"))
+        year = datetime.now(timezone.utc).year
+        results = tavily.search(
+            query=f"{league_name} current standings table {year}",
+            max_results=3,
+        )
+        items = results.get("results") or []
+        if not items:
+            raise RuntimeError("no fallback search results")
+
+        lines = [
+            f"{league_name.title()} standings source fallback:",
+            "The structured standings API is unavailable, so these are current web-search references rather than a parsed official table.",
+        ]
+        for item in items:
             lines.append(
-                f"{item.get('position', '?')}. "
-                f"{item.get('team', {}).get('name', 'Unknown')} - "
-                f"{item.get('points', 0)} pts"
+                f"- {item.get('title', 'Untitled')}: "
+                f"{str(item.get('content', ''))[:220]}..."
             )
         return "\n".join(lines)
-    except Exception as exc:
-        return f"I couldn't retrieve the standings right now: {exc}"
+    except Exception as fallback_exc:
+        return (
+            "I couldn't retrieve the standings right now. "
+            f"Primary source error: {primary_error}. "
+            f"Fallback error: {fallback_exc}"
+        )
 
 
 @tool
@@ -546,25 +578,19 @@ def get_team_form(team_name: str) -> str:
 
 @tool
 def get_team_stats(team_name: str) -> str:
-    """Search for recent performance and statistical information for a football team."""
+    """Get transparent recent-performance stats computed from the team's returned match history."""
     try:
-        tavily = TavilyClient(api_key=_require_env("TAVILY_API_KEY"))
-        year = datetime.now(timezone.utc).year
-        results = tavily.search(
-            query=f"{team_name} football team stats performance {year}",
-            max_results=3,
+        summary = _form_summary(team_name)
+        played = int(summary["played"])
+        return (
+            f"{summary['team']} recent performance stats "
+            f"(based on {played} match{'es' if played != 1 else ''} returned by the data provider):\n"
+            f"- Record: {summary['wins']}W {summary['draws']}D {summary['losses']}L\n"
+            f"- Goals scored: {summary['goals_for']} ({float(summary['goals_for_per_game']):.2f} per game)\n"
+            f"- Goals conceded: {summary['goals_against']} ({float(summary['goals_against_per_game']):.2f} per game)\n"
+            f"- Points per game: {float(summary['points_per_game']):.2f}\n"
+            f"- Goal difference per game: {float(summary['goal_diff_per_game']):+.2f}"
         )
-        items = results.get("results") or []
-        if not items:
-            return f"No recent stats were found for {team_name}."
-
-        lines = [f"{team_name} stats:"]
-        for item in items:
-            lines.append(
-                f"- {item.get('title', 'Untitled')}\n"
-                f"  {str(item.get('content', ''))[:220]}..."
-            )
-        return "\n\n".join(lines)
     except Exception as exc:
         return f"I couldn't retrieve team stats right now: {exc}"
 
@@ -614,7 +640,9 @@ Rules:
 5. Use the match-outlook tool when the user asks for a prediction. Clearly present it as an estimate, not a guaranteed result.
 6. Keep WhatsApp responses concise, readable, and conversational.
 7. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
-8. If a tool reports that data is unavailable, say so rather than inventing an answer.
+8. Never invent, infer, or embellish statistics that were not returned by a tool. Do not add xG, shot counts, possession, or other metrics unless a tool explicitly returned them.
+9. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on.
+10. If a tool reports that data is unavailable, say so rather than inventing an answer.
 """.strip()
 
     return create_react_agent(
