@@ -27,6 +27,7 @@ SPORTSDB_BASE_URL = f"https://www.thesportsdb.com/api/v1/json/{SPORTSDB_API_KEY}
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
 VERIFY_TWILIO_SIGNATURE = os.getenv("VERIFY_TWILIO_SIGNATURE", "false").lower() == "true"
+MEMORY_NAMESPACE = os.getenv("MEMORY_NAMESPACE", "v2")
 
 LEAGUE_CODES = {
     "premier league": "PL",
@@ -328,14 +329,12 @@ def get_league_standings(league_name: str) -> str:
             raise RuntimeError("no fallback search results")
 
         lines = [
-            f"{league_name.title()} standings source fallback:",
-            "The structured standings API is unavailable, so these are current web-search references rather than a parsed official table.",
+            f"{league_name.title()} standings are temporarily unavailable from the structured data provider.",
+            "I found related current web references, but they are not reliable enough to reconstruct a complete league table.",
+            "Do not infer, fill in, or invent positions, matches played, points, goals, or missing teams from these snippets.",
         ]
         for item in items:
-            lines.append(
-                f"- {item.get('title', 'Untitled')}: "
-                f"{str(item.get('content', ''))[:220]}..."
-            )
+            lines.append(f"- Reference: {item.get('title', 'Untitled')}")
         return "\n".join(lines)
     except Exception as fallback_exc:
         return (
@@ -640,9 +639,11 @@ Rules:
 5. Use the match-outlook tool when the user asks for a prediction. Clearly present it as an estimate, not a guaranteed result.
 6. Keep WhatsApp responses concise, readable, and conversational.
 7. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
-8. Never invent, infer, or embellish statistics that were not returned by a tool. Do not add xG, shot counts, possession, or other metrics unless a tool explicitly returned them.
-9. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on.
-10. If a tool reports that data is unavailable, say so rather than inventing an answer.
+8. Never invent, infer, reconstruct, or embellish statistics that were not returned by a tool in the current turn. Do not add xG, shot counts, possession, table positions, points, goals, or other metrics unless a current-turn tool explicitly returned them.
+9. Never reuse numeric sports data from conversation memory as if it were current. For standings, results, fixtures, form, injuries, scorers, or stats, current-turn tool output is the only authoritative source.
+10. If a standings tool says the structured table is unavailable, do not build a partial table from web snippets and do not fill missing rows with guesses or dashes.
+11. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on.
+12. If a tool reports that data is unavailable, say so rather than inventing an answer.
 """.strip()
 
     return create_react_agent(
@@ -700,7 +701,7 @@ def sanitize_whatsapp_response(response: str) -> str:
 def ask_agent(message: str, user_id: str) -> str:
     result = get_agent().invoke(
         {"messages": [{"role": "user", "content": message}]},
-        config={"configurable": {"thread_id": user_id}},
+        config={"configurable": {"thread_id": f"{MEMORY_NAMESPACE}:{user_id}"}},
     )
     raw_content = result["messages"][-1].content
     return sanitize_whatsapp_response(_content_to_text(raw_content))
