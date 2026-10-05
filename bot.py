@@ -517,10 +517,26 @@ def get_player_injury(player_name: str) -> str:
 
 @tool
 def predict_match(team1: str, team2: str) -> str:
-    """Estimate a match outcome from each team's five most recent results."""
+    """Estimate a match outcome only when enough recent match history is available."""
     try:
         first = _form_summary(team1)
         second = _form_summary(team2)
+
+        first_played = int(first["played"])
+        second_played = int(second["played"])
+        minimum_matches = 3
+
+        if first_played < minimum_matches or second_played < minimum_matches:
+            return (
+                f"I don't have enough recent match history to produce a reliable "
+                f"form-based outlook for {first['team']} vs {second['team']}.\n"
+                f"- {first['team']}: {first_played} recent "
+                f"{'match' if first_played == 1 else 'matches'} available\n"
+                f"- {second['team']}: {second_played} recent "
+                f"{'match' if second_played == 1 else 'matches'} available\n"
+                f"I need at least {minimum_matches} recent matches for each team "
+                "before calculating probabilities."
+            )
 
         first_strength = float(first["points_per_game"]) + 0.20 * float(first["goal_diff_per_game"])
         second_strength = float(second["points_per_game"]) + 0.20 * float(second["goal_diff_per_game"])
@@ -538,9 +554,11 @@ def predict_match(team1: str, team2: str) -> str:
 
         return (
             f"Data-driven match outlook: {first['team']} vs {second['team']}\n\n"
-            f"{first['team']} recent form: {first['wins']}W {first['draws']}D {first['losses']}L\n"
-            f"{second['team']} recent form: {second['wins']}W {second['draws']}D {second['losses']}L\n\n"
-            f"Estimated probabilities:\n"
+            f"{first['team']} recent form ({first_played} matches): "
+            f"{first['wins']}W {first['draws']}D {first['losses']}L\n"
+            f"{second['team']} recent form ({second_played} matches): "
+            f"{second['wins']}W {second['draws']}D {second['losses']}L\n\n"
+            "Estimated probabilities:\n"
             f"- {first['team']}: {first_prob * 100:.1f}%\n"
             f"- Draw: {draw_prob * 100:.1f}%\n"
             f"- {second['team']}: {second_prob * 100:.1f}%\n\n"
