@@ -502,10 +502,14 @@ def get_player_injury(player_name: str) -> str:
 
         lines = [f"Injury update for {player_name}:"]
         for item in items:
-            lines.append(
-                f"- {item.get('title', 'Untitled')}\n"
-                f"  {str(item.get('content', ''))[:220]}..."
-            )
+            snippet = _clean_web_snippet(item.get("content"), 180)
+            url = str(item.get("url") or "").strip()
+            entry = f"- {item.get('title', 'Untitled')}"
+            if snippet:
+                entry += f"\n  {snippet}"
+            if url:
+                entry += f"\n  Source: {url}"
+            lines.append(entry)
         return "\n\n".join(lines)
     except Exception as exc:
         return f"I couldn't search injury information right now: {exc}"
@@ -602,12 +606,16 @@ def get_head_to_head(team1: str, team2: str) -> str:
         if not items:
             return "No head-to-head information was found."
 
-        lines = [f"Head to head: {team1} vs {team2}"]
+        lines = [f"Head to head references: {team1} vs {team2}"]
         for item in items:
-            lines.append(
-                f"- {item.get('title', 'Untitled')}\n"
-                f"  {str(item.get('content', ''))[:220]}..."
-            )
+            snippet = _clean_web_snippet(item.get("content"), 170)
+            url = str(item.get("url") or "").strip()
+            entry = f"- {item.get('title', 'Untitled')}"
+            if snippet:
+                entry += f"\n  {snippet}"
+            if url:
+                entry += f"\n  Source: {url}"
+            lines.append(entry)
         return "\n\n".join(lines)
     except Exception as exc:
         return f"I couldn't retrieve head-to-head information right now: {exc}"
