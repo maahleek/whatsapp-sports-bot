@@ -1,444 +1,705 @@
-import requests
+import math
 import os
-from dotenv import load_dotenv
-from langchain.tools import tool
-from langchain_anthropic import ChatAnthropic
-from langgraph.prebuilt import create_react_agent
-from fastapi import FastAPI, Form
-from twilio.rest import Client
-from langgraph.checkpoint.sqlite import SqliteSaver
-import os
-#from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-#from langchain_huggingface import HuggingFaceEmbeddings
-#from langchain_chroma import Chroma
+import sqlite3
+from datetime import datetime, timezone
+from functools import lru_cache
+from typing import Any
 
-# Initialize vectorstore once
-#embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-#vectorstore = Chroma(
- #   persist_directory="./football_db",
-  #  embedding_function=embeddings
-#)
+import requests
+from dotenv import load_dotenv
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from langchain_core.tools import tool
+from langchain_groq import ChatGroq
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.prebuilt import create_react_agent
+from tavily import TavilyClient
+from twilio.request_validator import RequestValidator
+from twilio.rest import Client
+
+from rag import search_knowledge
 
 load_dotenv()
 
-BASE_URL = "https://www.thesportsdb.com/api/v1/json/123"
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SECONDS", "12"))
+SPORTSDB_API_KEY = os.getenv("SPORTSDB_API_KEY", "123")
+SPORTSDB_BASE_URL = f"https://www.thesportsdb.com/api/v1/json/{SPORTSDB_API_KEY}"
+FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
+TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
+VERIFY_TWILIO_SIGNATURE = os.getenv("VERIFY_TWILIO_SIGNATURE", "false").lower() == "true"
+
+LEAGUE_CODES = {
+    "premier league": "PL",
+    "epl": "PL",
+    "la liga": "PD",
+    "bundesliga": "BL1",
+    "serie a": "SA",
+    "ligue 1": "FL1",
+    "champions league": "CL",
+}
+
+app = FastAPI(
+    title="AI-Powered WhatsApp Football Assistant",
+    version="2.0.0",
+    description="Agentic football assistant with tool calling, live sports data, RAG, memory, and WhatsApp delivery.",
+)
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _safe_get_json(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    response = requests.get(
+        url,
+        headers=headers,
+        params=params,
+        timeout=HTTP_TIMEOUT,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("API returned an unexpected response format.")
+    return data
+
+
+def _current_season_start_year() -> int:
+    now = datetime.now(timezone.utc)
+    return now.year if now.month >= 7 else now.year - 1
+
+
+def _league_code(league_name: str) -> str | None:
+    return LEAGUE_CODES.get(league_name.strip().lower())
+
+
+def _team_record(team_name: str) -> tuple[str, str]:
+    data = _safe_get_json(
+        f"{SPORTSDB_BASE_URL}/searchteams.php",
+        params={"t": team_name},
+    )
+    teams = data.get("teams") or []
+    if not teams:
+        raise ValueError(f"Team '{team_name}' not found.")
+    team = teams[0]
+    return str(team["idTeam"]), str(team["strTeam"])
+
+
+def _recent_events(team_name: str, limit: int = 5) -> tuple[str, list[dict[str, Any]]]:
+    team_id, canonical_name = _team_record(team_name)
+    data = _safe_get_json(
+        f"{SPORTSDB_BASE_URL}/eventslast.php",
+        params={"id": team_id},
+    )
+    events = data.get("results") or []
+    return canonical_name, events[-limit:]
+
+
+def _form_summary(team_name: str) -> dict[str, float | str | int]:
+    canonical_name, events = _recent_events(team_name, 5)
+    if not events:
+        raise ValueError(f"No recent results found for {canonical_name}.")
+
+    points = 0
+    goals_for = 0
+    goals_against = 0
+    wins = draws = losses = 0
+
+    for event in events:
+        home = str(event.get("strHomeTeam", ""))
+        away = str(event.get("strAwayTeam", ""))
+        home_score = int(event.get("intHomeScore") or 0)
+        away_score = int(event.get("intAwayScore") or 0)
+
+        is_home = home.casefold() == canonical_name.casefold()
+        gf = home_score if is_home else away_score
+        ga = away_score if is_home else home_score
+
+        goals_for += gf
+        goals_against += ga
+
+        if gf > ga:
+            wins += 1
+            points += 3
+        elif gf == ga:
+            draws += 1
+            points += 1
+        else:
+            losses += 1
+
+    played = len(events)
+    return {
+        "team": canonical_name,
+        "played": played,
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "points_per_game": points / played,
+        "goal_diff_per_game": (goals_for - goals_against) / played,
+    }
+
+
+def _prediction_probabilities(
+    strength_a: float,
+    strength_b: float,
+) -> tuple[float, float, float]:
+    difference = strength_a - strength_b
+    draw_probability = max(
+        0.16,
+        min(0.30, 0.28 - 0.05 * min(abs(difference), 2.4)),
+    )
+    decisive_probability = 1.0 - draw_probability
+    team_a_share = 1.0 / (1.0 + math.exp(-1.15 * difference))
+    team_a_probability = decisive_probability * team_a_share
+    team_b_probability = decisive_probability - team_a_probability
+    return team_a_probability, draw_probability, team_b_probability
+
+
+def _football_data_headers() -> dict[str, str]:
+    return {"X-Auth-Token": _require_env("FOOTBALL_DATA_KEY")}
+
 
 @tool
 def get_team_info(team_name: str) -> str:
-    """Get basic info about a football team."""
-    response = requests.get(f"{BASE_URL}/searchteams.php?t={team_name}")
-    data = response.json()
-    if not data["teams"]:
-        return f"Team '{team_name}' not found."
-    team = data["teams"][0]
-    return f"Team: {team['strTeam']}\nLeague: {team['strLeague']}\nCountry: {team['strCountry']}\nStadium: {team['strStadium']}"
+    """Get basic information about a football team."""
+    try:
+        data = _safe_get_json(
+            f"{SPORTSDB_BASE_URL}/searchteams.php",
+            params={"t": team_name},
+        )
+        teams = data.get("teams") or []
+        if not teams:
+            return f"Team '{team_name}' not found."
+        team = teams[0]
+        return (
+            f"Team: {team.get('strTeam', 'Unknown')}\n"
+            f"League: {team.get('strLeague', 'Unknown')}\n"
+            f"Country: {team.get('strCountry', 'Unknown')}\n"
+            f"Stadium: {team.get('strStadium', 'Unknown')}"
+        )
+    except Exception as exc:
+        return f"I couldn't retrieve team information right now: {exc}"
+
 
 @tool
 def get_recent_results(team_name: str) -> str:
-    """Get recent match results for a football team."""
-    response = requests.get(f"{BASE_URL}/searchteams.php?t={team_name}")
-    data = response.json()
-    if not data["teams"]:
-        return f"Team '{team_name}' not found."
-    team_id = data["teams"][0]["idTeam"]
-    results = requests.get(f"{BASE_URL}/eventslast.php?id={team_id}")
-    events = results.json().get("results", [])
-    if not events:
-        return "No recent results found."
-    output = "Recent results:\n"
-    for e in events[-5:]:
-        output += f"{e['strEvent']}: {e['intHomeScore']}-{e['intAwayScore']}\n"
-    return output
+    """Get the five most recent results for a football team."""
+    try:
+        canonical_name, events = _recent_events(team_name, 5)
+        if not events:
+            return f"No recent results found for {canonical_name}."
+        lines = [f"Recent results for {canonical_name}:"]
+        for event in events:
+            lines.append(
+                f"- {event.get('strEvent', 'Match')}: "
+                f"{event.get('intHomeScore', '?')}-{event.get('intAwayScore', '?')}"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve recent results right now: {exc}"
+
 
 @tool
 def get_upcoming_fixtures(team_name: str) -> str:
     """Get upcoming fixtures for a football team."""
-    response = requests.get(f"{BASE_URL}/searchteams.php?t={team_name}")
-    data = response.json()
-    if not data["teams"]:
-        return f"Team '{team_name}' not found."
-    team_id = data["teams"][0]["idTeam"]
-    fixtures = requests.get(f"{BASE_URL}/eventsnext.php?id={team_id}")
-    events = fixtures.json().get("events", [])
-    if not events:
-        return "No upcoming fixtures found."
-    output = "Upcoming fixtures:\n"
-    for e in events[:5]:
-        output += f"{e['strEvent']} - {e['dateEvent']}\n"
-    return output
+    try:
+        team_id, canonical_name = _team_record(team_name)
+        data = _safe_get_json(
+            f"{SPORTSDB_BASE_URL}/eventsnext.php",
+            params={"id": team_id},
+        )
+        events = data.get("events") or []
+        if not events:
+            return f"No upcoming fixtures found for {canonical_name}."
+        lines = [f"Upcoming fixtures for {canonical_name}:"]
+        for event in events[:5]:
+            lines.append(
+                f"- {event.get('strEvent', 'Match')} - {event.get('dateEvent', 'Date unavailable')}"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve upcoming fixtures right now: {exc}"
+
 
 @tool
 def get_team_players(team_name: str) -> str:
-    """Get list of players for a football team."""
-    response = requests.get(f"{BASE_URL}/searchteams.php?t={team_name}")
-    data = response.json()
-    if not data["teams"]:
-        return f"Team '{team_name}' not found."
-    team_id = data["teams"][0]["idTeam"]
-    players = requests.get(f"{BASE_URL}/lookup_all_players.php?id={team_id}")
-    data = players.json()
-    if not data.get("player"):
-        return "No players found."
-    output = "Players:\n"
-    for p in data["player"][:15]:
-        output += f"- {p['strPlayer']} ({p['strPosition']})\n"
-    return output
+    """Get a list of players for a football team."""
+    try:
+        team_id, canonical_name = _team_record(team_name)
+        data = _safe_get_json(
+            f"{SPORTSDB_BASE_URL}/lookup_all_players.php",
+            params={"id": team_id},
+        )
+        players = data.get("player") or []
+        if not players:
+            return f"No players found for {canonical_name}."
+        lines = [f"Players for {canonical_name}:"]
+        for player in players[:15]:
+            lines.append(
+                f"- {player.get('strPlayer', 'Unknown')} "
+                f"({player.get('strPosition', 'Position unavailable')})"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve the squad right now: {exc}"
+
 
 @tool
 def search_player(player_name: str) -> str:
-    """Search for a football player and get their info."""
-    headers = {
-        "x-rapidapi-host": "free-api-live-football-data.p.rapidapi.com",
-        "x-rapidapi-key": os.getenv("RAPIDAPI_KEY")
-    }
-    response = requests.get(
-        "https://free-api-live-football-data.p.rapidapi.com/football-players-search",
-        headers=headers,
-        params={"search": player_name}
-    )
-    data = response.json()
-    players = data.get("response", [])
-    if not players:
-        return f"No player found for '{player_name}'."
-    output = "Players found:\n"
-    count = 0
-    for p in players:
-        if count >= 5:
-            break
-        if isinstance(p, dict):
-            name = p.get("name", "Unknown")
-            team = p.get("teamName", "Unknown team")
-            output += f"- {name} ({team})\n"
-        else:
-            output += f"- {p}\n"
-        count += 1
-    return output
+    """Search for a football player and return matching player records."""
+    try:
+        data = _safe_get_json(
+            "https://free-api-live-football-data.p.rapidapi.com/football-players-search",
+            headers={
+                "x-rapidapi-host": "free-api-live-football-data.p.rapidapi.com",
+                "x-rapidapi-key": _require_env("RAPIDAPI_KEY"),
+            },
+            params={"search": player_name},
+        )
+        players = data.get("response") or []
+        if not players:
+            return f"No player found for '{player_name}'."
+
+        lines = ["Players found:"]
+        for player in players[:5]:
+            if isinstance(player, dict):
+                lines.append(
+                    f"- {player.get('name', 'Unknown')} "
+                    f"({player.get('teamName', 'Unknown team')})"
+                )
+            else:
+                lines.append(f"- {player}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't search for that player right now: {exc}"
+
+
 @tool
 def get_league_standings(league_name: str) -> str:
-    """Get current standings/table for a football league. Supports Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Champions League."""
-    league_codes = {
-        "premier league": "PL",
-        "epl": "PL",
-        "la liga": "PD",
-        "bundesliga": "BL1",
-        "serie a": "SA",
-        "ligue 1": "FL1",
-        "champions league": "CL",
-    }
-    
-    code = league_codes.get(league_name.lower())
+    """Get current standings for a supported football league."""
+    code = _league_code(league_name)
     if not code:
-        return f"League '{league_name}' not supported. Try: Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Champions League."
-    
-    headers = {"X-Auth-Token": os.getenv("FOOTBALL_DATA_KEY")}
-    response = requests.get(
-        f"https://api.football-data.org/v4/competitions/{code}/standings",
-        headers=headers
-    )
-    data = response.json()
-    standings = data.get("standings", [])[0].get("table", [])
-    if not standings:
-        return "Standings not available right now."
-    
-    output = f"{league_name.title()} Standings:\n"
-    for team in standings[:10]:
-        output += f"{team['position']}. {team['team']['name']} - {team['points']} pts\n"
-    return output
+        return (
+            f"League '{league_name}' is not supported. Try Premier League, "
+            "La Liga, Bundesliga, Serie A, Ligue 1, or Champions League."
+        )
+
+    try:
+        data = _safe_get_json(
+            f"{FOOTBALL_DATA_BASE_URL}/competitions/{code}/standings",
+            headers=_football_data_headers(),
+        )
+        standings = data.get("standings") or []
+        table = standings[0].get("table", []) if standings else []
+        if not table:
+            return "Standings are not available right now."
+
+        lines = [f"{league_name.title()} standings:"]
+        for item in table[:10]:
+            lines.append(
+                f"{item.get('position', '?')}. "
+                f"{item.get('team', {}).get('name', 'Unknown')} - "
+                f"{item.get('points', 0)} pts"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve the standings right now: {exc}"
+
 
 @tool
 def get_live_scores() -> str:
-    """Get current live football scores happening right now."""
-    headers = {"X-Auth-Token": os.getenv("FOOTBALL_DATA_KEY")}
-    response = requests.get(
-        "https://api.football-data.org/v4/matches?status=LIVE",
-        headers=headers
-    )
-    data = response.json()
-    matches = data.get("matches", [])
-    if not matches:
-        return "No live matches right now."
-    
-    output = "Live Scores:\n"
-    for m in matches[:10]:
-        home = m["homeTeam"]["name"]
-        away = m["awayTeam"]["name"]
-        home_score = m["score"]["fullTime"]["home"]
-        away_score = m["score"]["fullTime"]["away"]
-        output += f"{home} {home_score} - {away_score} {away}\n"
-    return output
+    """Get football matches currently marked as live."""
+    try:
+        data = _safe_get_json(
+            f"{FOOTBALL_DATA_BASE_URL}/matches",
+            headers=_football_data_headers(),
+            params={"status": "LIVE"},
+        )
+        matches = data.get("matches") or []
+        if not matches:
+            return "No live matches are available right now."
 
-from tavily import TavilyClient
+        lines = ["Live scores:"]
+        for match in matches[:10]:
+            score = match.get("score", {})
+            full_time = score.get("fullTime") or {}
+            home_score = full_time.get("home")
+            away_score = full_time.get("away")
+            if home_score is None or away_score is None:
+                half_time = score.get("halfTime") or {}
+                home_score = half_time.get("home", "?")
+                away_score = half_time.get("away", "?")
+            lines.append(
+                f"- {match.get('homeTeam', {}).get('name', 'Home')} "
+                f"{home_score} - {away_score} "
+                f"{match.get('awayTeam', {}).get('name', 'Away')}"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve live scores right now: {exc}"
+
 
 @tool
 def get_transfer_news(query: str) -> str:
-    """Search for latest football transfer news, injuries, and updates."""
-    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    results = tavily.search(
-        query=f"football {query} 2026",
-        max_results=3
-    )
-    if not results["results"]:
-        return "No news found."
-    
-    output = f"Latest news on '{query}':\n"
-    for r in results["results"]:
-        output += f"- {r['title']}\n  {r['content'][:150]}...\n\n"
-    return output
+    """Search the web for recent football transfer news, injuries, and updates."""
+    try:
+        tavily = TavilyClient(api_key=_require_env("TAVILY_API_KEY"))
+        year = datetime.now(timezone.utc).year
+        results = tavily.search(
+            query=f"football {query} {year}",
+            max_results=3,
+        )
+        items = results.get("results") or []
+        if not items:
+            return "No recent football news was found."
+
+        lines = [f"Latest football news on '{query}':"]
+        for item in items:
+            lines.append(
+                f"- {item.get('title', 'Untitled')}\n"
+                f"  {str(item.get('content', ''))[:220]}..."
+            )
+        return "\n\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't search the latest football news right now: {exc}"
+
 
 @tool
 def get_top_scorers(league_name: str) -> str:
-    """Get top scorers for a football league."""
-    league_codes = {
-        "premier league": "PL",
-        "epl": "PL",
-        "la liga": "PD",
-        "bundesliga": "BL1",
-        "serie a": "SA",
-        "ligue 1": "FL1",
-        "champions league": "CL",
-    }
-    
-    code = league_codes.get(league_name.lower())
+    """Get top scorers for a supported football league."""
+    code = _league_code(league_name)
     if not code:
-        return f"League '{league_name}' not supported. Try: Premier League, La Liga, Bundesliga, Serie A, Ligue 1."
-    
-    headers = {"X-Auth-Token": os.getenv("FOOTBALL_DATA_KEY")}
-    response = requests.get(
-        f"https://api.football-data.org/v4/competitions/{code}/scorers",
-        headers=headers,
-        params={"season": "2025"}
-    )
-    data = response.json()
-    scorers = data.get("scorers", [])
-    if not scorers:
-        return "No scorers data available."
-    
-    output = f"Top Scorers - {league_name.title()}:\n"
-    for i, s in enumerate(scorers[:10], 1):
-        name = s["player"]["name"]
-        team = s["team"]["shortName"]
-        goals = s["goals"]
-        assists = s.get("assists", 0)
-        output += f"{i}. {name} ({team}) - {goals} goals, {assists} assists\n"
-    return output
+        return (
+            f"League '{league_name}' is not supported. Try Premier League, "
+            "La Liga, Bundesliga, Serie A, Ligue 1, or Champions League."
+        )
+
+    try:
+        data = _safe_get_json(
+            f"{FOOTBALL_DATA_BASE_URL}/competitions/{code}/scorers",
+            headers=_football_data_headers(),
+            params={"season": str(_current_season_start_year())},
+        )
+        scorers = data.get("scorers") or []
+        if not scorers:
+            return "No scorer data is available right now."
+
+        lines = [f"Top scorers - {league_name.title()}:"]
+        for index, scorer in enumerate(scorers[:10], start=1):
+            lines.append(
+                f"{index}. {scorer.get('player', {}).get('name', 'Unknown')} "
+                f"({scorer.get('team', {}).get('shortName', 'Unknown')}) - "
+                f"{scorer.get('goals', 0)} goals, {scorer.get('assists') or 0} assists"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve top scorers right now: {exc}"
+
 
 @tool
 def get_player_injury(player_name: str) -> str:
-    """Get latest injury news and status for a football player."""
-    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    results = tavily.search(
-        query=f"{player_name} injury update 2026",
-        max_results=3
-    )
-    if not results["results"]:
-        return f"No injury news found for {player_name}."
-    
-    output = f"Injury update for {player_name}:\n"
-    for r in results["results"]:
-        output += f"- {r['title']}\n  {r['content'][:200]}...\n\n"
-    return output
+    """Search for recent injury information about a football player."""
+    try:
+        tavily = TavilyClient(api_key=_require_env("TAVILY_API_KEY"))
+        year = datetime.now(timezone.utc).year
+        results = tavily.search(
+            query=f"{player_name} injury update football {year}",
+            max_results=3,
+        )
+        items = results.get("results") or []
+        if not items:
+            return f"No recent injury news was found for {player_name}."
+
+        lines = [f"Injury update for {player_name}:"]
+        for item in items:
+            lines.append(
+                f"- {item.get('title', 'Untitled')}\n"
+                f"  {str(item.get('content', ''))[:220]}..."
+            )
+        return "\n\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't search injury information right now: {exc}"
+
 
 @tool
 def predict_match(team1: str, team2: str) -> str:
-    """Predict the outcome of a football match between two teams based on recent form and stats."""
-    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    
-    # Search for recent form of both teams
-    results = tavily.search(
-        query=f"{team1} vs {team2} prediction 2026 form stats",
-        max_results=3
-    )
-    
-    if not results["results"]:
-        return "Not enough data to make a prediction."
-    
-    output = f"Match Preview: {team1} vs {team2}\n\n"
-    for r in results["results"]:
-        output += f"- {r['title']}\n  {r['content'][:200]}...\n\n"
-    return output
+    """Estimate a match outcome from each team's five most recent results."""
+    try:
+        first = _form_summary(team1)
+        second = _form_summary(team2)
+
+        first_strength = float(first["points_per_game"]) + 0.20 * float(first["goal_diff_per_game"])
+        second_strength = float(second["points_per_game"]) + 0.20 * float(second["goal_diff_per_game"])
+        first_prob, draw_prob, second_prob = _prediction_probabilities(
+            first_strength,
+            second_strength,
+        )
+
+        outcomes = {
+            str(first["team"]): first_prob,
+            "Draw": draw_prob,
+            str(second["team"]): second_prob,
+        }
+        likely_outcome = max(outcomes, key=outcomes.get)
+
+        return (
+            f"Data-driven match outlook: {first['team']} vs {second['team']}\n\n"
+            f"{first['team']} recent form: {first['wins']}W {first['draws']}D {first['losses']}L\n"
+            f"{second['team']} recent form: {second['wins']}W {second['draws']}D {second['losses']}L\n\n"
+            f"Estimated probabilities:\n"
+            f"- {first['team']}: {first_prob * 100:.1f}%\n"
+            f"- Draw: {draw_prob * 100:.1f}%\n"
+            f"- {second['team']}: {second_prob * 100:.1f}%\n\n"
+            f"Most likely outcome: {likely_outcome}\n"
+            "This is a simple form-based estimate, not a guaranteed result or betting model."
+        )
+    except Exception as exc:
+        return f"I couldn't generate a match outlook right now: {exc}"
+
 
 @tool
 def search_football_knowledge(question: str) -> str:
-    """Search football rules, regulations and knowledge base to answer questions."""
-    results = vectorstore.similarity_search(question, k=2)
-    if not results:
-        return "No relevant information found."
-    
-    output = "From football knowledge base:\n"
-    for r in results:
-        output += f"{r.page_content}\n\n"
-    return output
+    """Search the local football rules knowledge base using semantic retrieval."""
+    try:
+        passages = search_knowledge(question, k=2)
+        if not passages:
+            return "No relevant information was found in the football knowledge base."
+        return "From the football knowledge base:\n\n" + "\n\n".join(passages)
+    except Exception as exc:
+        return f"I couldn't search the football knowledge base right now: {exc}"
+
 
 @tool
 def get_league_fixtures(league_name: str) -> str:
-    """Get upcoming fixtures for a football league."""
-    league_codes = {
-        "premier league": "PL",
-        "epl": "PL",
-        "la liga": "PD",
-        "bundesliga": "BL1",
-        "serie a": "SA",
-        "ligue 1": "FL1",
-        "champions league": "CL",
-    }
-    
-    code = league_codes.get(league_name.lower())
+    """Get upcoming fixtures for a supported football league."""
+    code = _league_code(league_name)
     if not code:
-        return f"League '{league_name}' not supported."
-    
-    headers = {"X-Auth-Token": os.getenv("FOOTBALL_DATA_KEY")}
-    response = requests.get(
-        f"https://api.football-data.org/v4/competitions/{code}/matches",
-        headers=headers,
-        params={"status": "SCHEDULED"}
-    )
-    data = response.json()
-    matches = data.get("matches", [])
-    if not matches:
-        return f"No upcoming fixtures found for {league_name}."
-    
-    output = f"Upcoming {league_name.title()} Fixtures:\n"
-    for m in matches[:10]:
-        home = m["homeTeam"]["name"]
-        away = m["awayTeam"]["name"]
-        date = m["utcDate"][:10]
-        output += f"{date}: {home} vs {away}\n"
-    return output
+        return f"League '{league_name}' is not supported."
+
+    try:
+        data = _safe_get_json(
+            f"{FOOTBALL_DATA_BASE_URL}/competitions/{code}/matches",
+            headers=_football_data_headers(),
+            params={"status": "SCHEDULED"},
+        )
+        matches = data.get("matches") or []
+        if not matches:
+            return f"No upcoming fixtures found for {league_name}."
+
+        lines = [f"Upcoming {league_name.title()} fixtures:"]
+        for match in matches[:10]:
+            utc_date = str(match.get("utcDate", ""))[:10] or "Date unavailable"
+            lines.append(
+                f"- {utc_date}: "
+                f"{match.get('homeTeam', {}).get('name', 'Home')} vs "
+                f"{match.get('awayTeam', {}).get('name', 'Away')}"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve league fixtures right now: {exc}"
+
 
 @tool
 def get_head_to_head(team1: str, team2: str) -> str:
-    """Get head to head history between two football teams."""
-    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    results = tavily.search(
-        query=f"{team1} vs {team2} head to head history results",
-        max_results=3
-    )
-    if not results["results"]:
-        return "No head to head data found."
-    
-    output = f"Head to Head: {team1} vs {team2}\n\n"
-    for r in results["results"]:
-        output += f"- {r['title']}\n  {r['content'][:200]}...\n\n"
-    return output
+    """Search for recent head-to-head information between two football teams."""
+    try:
+        tavily = TavilyClient(api_key=_require_env("TAVILY_API_KEY"))
+        results = tavily.search(
+            query=f"{team1} vs {team2} head to head football results",
+            max_results=3,
+        )
+        items = results.get("results") or []
+        if not items:
+            return "No head-to-head information was found."
+
+        lines = [f"Head to head: {team1} vs {team2}"]
+        for item in items:
+            lines.append(
+                f"- {item.get('title', 'Untitled')}\n"
+                f"  {str(item.get('content', ''))[:220]}..."
+            )
+        return "\n\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve head-to-head information right now: {exc}"
+
 
 @tool
 def get_team_form(team_name: str) -> str:
-    """Get the last 5 match results for a team in W/D/L format."""
-    response = requests.get(f"{BASE_URL}/searchteams.php?t={team_name}")
-    data = response.json()
-    if not data["teams"]:
-        return f"Team '{team_name}' not found."
-    team_id = data["teams"][0]["idTeam"]
-    
-    results = requests.get(f"{BASE_URL}/eventslast.php?id={team_id}")
-    events = results.json().get("results", [])
-    if not events:
-        return "No recent form data found."
-    
-    output = f"{team_name} Recent Form:\n"
-    for e in events[-5:]:
-        home = e["strHomeTeam"]
-        away = e["strAwayTeam"]
-        home_score = int(e["intHomeScore"])
-        away_score = int(e["intAwayScore"])
-        
-        if home == team_name:
-            if home_score > away_score:
-                result = "W"
-            elif home_score < away_score:
-                result = "L"
-            else:
-                result = "D"
-        else:
-            if away_score > home_score:
-                result = "W"
-            elif away_score < home_score:
-                result = "L"
-            else:
-                result = "D"
-        
-        output += f"{result} - {e['strEvent']} ({home_score}-{away_score})\n"
-    return output
+    """Get a team's last five results in W/D/L form."""
+    try:
+        summary = _form_summary(team_name)
+        return (
+            f"{summary['team']} recent form: "
+            f"{summary['wins']}W {summary['draws']}D {summary['losses']}L "
+            f"from the last {summary['played']} matches."
+        )
+    except Exception as exc:
+        return f"I couldn't retrieve team form right now: {exc}"
+
 
 @tool
 def get_team_stats(team_name: str) -> str:
-    """Get recent stats and performance data for a football team."""
-    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    results = tavily.search(
-        query=f"{team_name} football team stats performance 2026",
-        max_results=3
+    """Search for recent performance and statistical information for a football team."""
+    try:
+        tavily = TavilyClient(api_key=_require_env("TAVILY_API_KEY"))
+        year = datetime.now(timezone.utc).year
+        results = tavily.search(
+            query=f"{team_name} football team stats performance {year}",
+            max_results=3,
+        )
+        items = results.get("results") or []
+        if not items:
+            return f"No recent stats were found for {team_name}."
+
+        lines = [f"{team_name} stats:"]
+        for item in items:
+            lines.append(
+                f"- {item.get('title', 'Untitled')}\n"
+                f"  {str(item.get('content', ''))[:220]}..."
+            )
+        return "\n\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't retrieve team stats right now: {exc}"
+
+
+TOOLS = [
+    get_team_info,
+    get_recent_results,
+    get_upcoming_fixtures,
+    get_team_players,
+    search_player,
+    get_league_standings,
+    get_live_scores,
+    get_transfer_news,
+    get_top_scorers,
+    get_player_injury,
+    predict_match,
+    search_football_knowledge,
+    get_league_fixtures,
+    get_head_to_head,
+    get_team_form,
+    get_team_stats,
+]
+
+
+@lru_cache(maxsize=1)
+def get_agent():
+    model = ChatGroq(
+        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        temperature=0,
+        api_key=_require_env("GROQ_API_KEY"),
     )
-    if not results["results"]:
-        return f"No stats found for {team_name}."
-    
-    output = f"{team_name} Stats:\n\n"
-    for r in results["results"]:
-        output += f"- {r['title']}\n  {r['content'][:200]}...\n\n"
-    return output
 
-model = ChatAnthropic(model="claude-haiku-4-5", temperature=0, api_key=os.getenv("ANTHROPIC_API_KEY"))
-from langgraph.checkpoint.sqlite import SqliteSaver
-import sqlite3
+    connection = sqlite3.connect(
+        os.getenv("MEMORY_DB_PATH", "memory.db"),
+        check_same_thread=False,
+    )
+    memory = SqliteSaver(connection)
 
-conn = sqlite3.connect("memory.db", check_same_thread=False)
-memory = SqliteSaver(conn)
+    prompt = """
+You are a friendly football assistant operating on WhatsApp.
 
-agent = create_react_agent(
-    model=model,
-    tools=[get_team_info, get_recent_results, get_upcoming_fixtures, get_team_players, search_player, get_league_standings, get_live_scores, get_transfer_news, get_top_scorers, get_player_injury, predict_match, get_league_fixtures, get_head_to_head, get_team_form, get_team_stats],
-    prompt="You are a friendly football sports assistant on WhatsApp. STRICT RULES: 1) NEVER show function names, XML tags, or code in your responses - always respond in plain conversational text. 2) NEVER use markdown formatting like **bold**, *italic*, or # headers - WhatsApp does not support markdown, use plain text with emojis only. 3) For football rules, offside, VAR, cards, penalties - use explain_offside or football_dictionary tool. 4) For team info - use get_team_info. 5) For standings - use get_standings_from_db first, fallback to get_league_standings. 6) For live scores - use get_live_scores. 7) For transfers/news - use get_transfer_news or get_transfers. 8) For predictions - use predict_match. 9) For player search - use search_player_from_db first, fallback to search_player. 10) For top scorers - use get_top_scorers_from_db first, fallback to get_top_scorers. 11) For injuries - use get_player_injury. 12) For player stats - use get_player_stats. 13) For manager info - use get_manager_info. 14) For stadium info - use get_stadium_info. 15) For comparing players - use compare_players. 16) For comparing teams - use compare_teams. 17) For World Cup history - use get_world_cup_history. 18) For Ballon d Or history - use get_ballon_dor_history. 19) For team form - use get_team_form. 20) For head to head - use get_head_to_head. 21) For league fixtures - use get_league_fixtures. 22) For top assists - use get_league_top_assists. 23) ALWAYS use a tool first before answering. 24) Present results in a clean friendly WhatsApp message format using emojis.",
-    checkpointer=memory,
-)
+Rules:
+1. Use an appropriate tool before answering factual or time-sensitive football questions.
+2. Never expose function names, tool calls, XML, JSON, internal reasoning, or code to the user.
+3. Use the football knowledge-base tool for rules such as offside, VAR, cards, and penalties.
+4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
+5. Use the match-outlook tool when the user asks for a prediction. Clearly present it as an estimate, not a guaranteed result.
+6. Keep WhatsApp responses concise, readable, and conversational.
+7. If a tool reports that data is unavailable, say so rather than inventing an answer.
+""".strip()
+
+    return create_react_agent(
+        model=model,
+        tools=TOOLS,
+        prompt=prompt,
+        checkpointer=memory,
+    )
+
 
 def ask_agent(message: str, user_id: str) -> str:
-    config = {"configurable": {"thread_id": user_id}}
-    result = agent.invoke(
+    result = get_agent().invoke(
         {"messages": [{"role": "user", "content": message}]},
-        config=config
+        config={"configurable": {"thread_id": user_id}},
     )
-    
-    response = result["messages"][-1].content
-    
-    # Clean up function call syntax
-    import re
-    response = re.sub(r'<function=\w+>.*?</function>', '', response, flags=re.DOTALL)
-    response = response.strip()
-    
-    # Remove markdown formatting
-    response = re.sub(r'\*\*(.*?)\*\*', r'\1', response)  # Remove **bold**
-    response = re.sub(r'\*(.*?)\*', r'\1', response)  # Remove *italic*
-    response = re.sub(r'#{1,6}\s', '', response)  # Remove headers
-    response = re.sub(r'`(.*?)`', r'\1', response)  # Remove code
-    
-    if not response:
-        response = "Sorry, I couldn't process that. Please try again!"
-    
-    return response
+    return result["messages"][-1].content
 
-app = FastAPI()
 
-@app.post("/webhook")
-async def webhook(Body: str = Form(), From: str = Form()):
+def _send_whatsapp_message(to: str, body: str) -> None:
+    client = Client(
+        _require_env("TWILIO_ACCOUNT_SID"),
+        _require_env("TWILIO_AUTH_TOKEN"),
+    )
+    client.messages.create(
+        from_=TWILIO_WHATSAPP_FROM,
+        to=to,
+        body=body,
+    )
+
+
+def process_and_reply(message: str, sender: str) -> None:
     try:
-        response = ask_agent(Body, From)
-        client = Client(
-            os.getenv("TWILIO_ACCOUNT_SID"),
-            os.getenv("TWILIO_AUTH_TOKEN")
+        response = ask_agent(message, sender)
+    except Exception as exc:
+        print(f"Agent error for {sender}: {exc}")
+        response = (
+            "Sorry, I couldn't process that request right now. "
+            "Please try again in a moment."
         )
-        client.messages.create(
-            from_="whatsapp:+14155238886",
-            to=From,
-            body=response
-        )
-    except Exception as e:
-        print(f"Error: {e}")
+
+    try:
+        _send_whatsapp_message(sender, response)
+    except Exception as exc:
+        print(f"Twilio send error for {sender}: {exc}")
+
+
+def _validate_twilio_request(request: Request, form_data: dict[str, str]) -> bool:
+    if not VERIFY_TWILIO_SIGNATURE:
+        return True
+
+    auth_token = _require_env("TWILIO_AUTH_TOKEN")
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not signature:
+        return False
+
+    validator = RequestValidator(auth_token)
+    return validator.validate(str(request.url), form_data, signature)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
     return {"status": "ok"}
 
+
+@app.post("/webhook", status_code=204)
+async def webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> Response:
+    raw_form = await request.form()
+    form_data = {key: str(value) for key, value in raw_form.items()}
+
+    if not _validate_twilio_request(request, form_data):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature.")
+
+    body = form_data.get("Body", "").strip()
+    sender = form_data.get("From", "").strip()
+
+    if not body or not sender:
+        raise HTTPException(status_code=400, detail="Missing WhatsApp message data.")
+
+    background_tasks.add_task(process_and_reply, body, sender)
+    return Response(status_code=204)
+
+
 if __name__ == "__main__":
-    from pyngrok import ngrok
     import uvicorn
-    public_url = ngrok.connect(8000)
-    print(f"Public URL: {public_url}")
-    print("Server starting...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
