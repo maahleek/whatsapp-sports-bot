@@ -178,6 +178,41 @@ def _football_data_headers() -> dict[str, str]:
     return {"X-Auth-Token": _require_env("FOOTBALL_DATA_KEY")}
 
 
+def _clean_web_snippet(value: Any, limit: int = 220) -> str:
+    """Collapse noisy search-result text into a short plain-text snippet."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = text.replace("**", "")
+    if len(text) > limit:
+        text = text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def _extract_player_records(payload: Any) -> list[dict[str, Any]]:
+    """Handle the different response shapes returned by the player-search API."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+
+    if not isinstance(payload, dict):
+        return []
+
+    if any(key in payload for key in ("name", "playerName", "strPlayer")):
+        return [payload]
+
+    for key in ("response", "players", "suggestions", "results", "data", "items"):
+        if key not in payload:
+            continue
+        records = _extract_player_records(payload[key])
+        if records:
+            return records
+
+    for value in payload.values():
+        records = _extract_player_records(value)
+        if records:
+            return records
+
+    return []
+
+
 @tool
 def get_team_info(team_name: str) -> str:
     """Get basic information about a football team."""
