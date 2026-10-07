@@ -621,6 +621,15 @@ def _betting_market_report(context: dict[str, Any], market_request: str = "all")
             )
         lines.append("")
 
+    if wants_all:
+        lines.extend(
+            [
+                "Not modelled from the current data sources:",
+                "- Corners, cards, player shots, player cards, player goalscorer props, and other event-level props require dedicated historical data.",
+                "",
+            ]
+        )
+
     lines.append(
         "These are model probability estimates, not guaranteed outcomes or betting advice."
     )
