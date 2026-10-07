@@ -540,6 +540,8 @@ def _build_prediction_context(team1: str, team2: str) -> dict[str, Any]:
         "likely_outcome": likely_outcome,
         "confidence": confidence,
         "venue_note": venue_note,
+        "fixture": fixture,
+        "first_is_home": first_is_home,
         "projection": projection,
         "probability_source": probability_source,
     }
@@ -950,10 +952,25 @@ def predict_match(team1: str, team2: str) -> str:
 
         score_line = ""
         projection = context["projection"]
+        fixture = context["fixture"]
+        first_is_home = context["first_is_home"]
         if projection is not None:
             best = projection["top_scores"][0]
+            if fixture is not None and first_is_home is False:
+                score_home = best[1]
+                score_away = best[0]
+                score_label = (
+                    f"{fixture['home']} {score_home}-{score_away} {fixture['away']}"
+                )
+            elif fixture is not None:
+                score_label = (
+                    f"{fixture['home']} {best[0]}-{best[1]} {fixture['away']}"
+                )
+            else:
+                score_label = f"{first_name} {best[0]}-{best[1]} {second_name}"
+
             score_line = (
-                f"\nMost likely scoreline: {first_name} {best[0]}-{best[1]} {second_name} "
+                f"\nMost likely scoreline: {score_label} "
                 f"({best[2] * 100:.1f}% as a single exact score)\n"
             )
 
@@ -990,8 +1007,15 @@ def predict_correct_score(team1: str, team2: str) -> str:
                 "but I do not have enough scoring data for an exact-score projection."
             )
 
+        fixture = context["fixture"]
+        first_is_home = context["first_is_home"]
+        if fixture is not None:
+            matchup_title = f"{fixture['home']} vs {fixture['away']}"
+        else:
+            matchup_title = f"{first_name} vs {second_name}"
+
         lines = [
-            f"Correct-score projection: {first_name} vs {second_name}",
+            f"Correct-score projection: {matchup_title}",
             context["venue_note"],
             "",
             "Most likely scorelines:",
@@ -1000,9 +1024,23 @@ def predict_correct_score(team1: str, team2: str) -> str:
             projection["top_scores"],
             start=1,
         ):
+            if fixture is not None and first_is_home is False:
+                home_goals = second_goals
+                away_goals = first_goals
+                score_text = (
+                    f"{fixture['home']} {home_goals}-{away_goals} {fixture['away']}"
+                )
+            elif fixture is not None:
+                score_text = (
+                    f"{fixture['home']} {first_goals}-{second_goals} {fixture['away']}"
+                )
+            else:
+                score_text = (
+                    f"{first_name} {first_goals}-{second_goals} {second_name}"
+                )
+
             lines.append(
-                f"{index}. {first_name} {first_goals}-{second_goals} {second_name} "
-                f"({probability * 100:.1f}%)"
+                f"{index}. {score_text} ({probability * 100:.1f}%)"
             )
         lines.extend(
             [
