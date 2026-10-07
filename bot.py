@@ -38,12 +38,18 @@ _MAX_PROCESSED_MESSAGE_SIDS = 1000
 
 LEAGUE_CODES = {
     "premier league": "PL",
+    "english premier league": "PL",
     "epl": "PL",
     "la liga": "PD",
+    "spanish la liga": "PD",
     "bundesliga": "BL1",
+    "german bundesliga": "BL1",
     "serie a": "SA",
+    "italian serie a": "SA",
     "ligue 1": "FL1",
+    "french ligue 1": "FL1",
     "champions league": "CL",
+    "uefa champions league": "CL",
 }
 
 app = FastAPI(
@@ -176,6 +182,112 @@ def _prediction_probabilities(
 
 def _football_data_headers() -> dict[str, str]:
     return {"X-Auth-Token": _require_env("FOOTBALL_DATA_KEY")}
+
+
+def _normalize_team_name(name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", name.casefold())
+    tokens = [
+        token
+        for token in normalized.split()
+        if token not in {"fc", "afc", "cf", "club", "football"}
+    ]
+    return " ".join(tokens)
+
+
+def _team_profile(team_name: str) -> dict[str, str]:
+    data = _safe_get_json(
+        f"{SPORTSDB_BASE_URL}/searchteams.php",
+        params={"t": team_name},
+    )
+    teams = data.get("teams") or []
+    if not teams:
+        raise ValueError(f"Team '{team_name}' not found.")
+
+    team = teams[0]
+    return {
+        "id": str(team.get("idTeam") or ""),
+        "name": str(team.get("strTeam") or team_name),
+        "league": str(team.get("strLeague") or ""),
+    }
+
+
+def _season_team_summary(team_name: str) -> dict[str, float | int | str] | None:
+    profile = _team_profile(team_name)
+    code = _league_code(profile["league"])
+    if not code:
+        return None
+
+    data = _safe_get_json(
+        f"{FOOTBALL_DATA_BASE_URL}/competitions/{code}/standings",
+        headers=_football_data_headers(),
+    )
+    standings = data.get("standings") or []
+    table = standings[0].get("table", []) if standings else []
+    target = _normalize_team_name(profile["name"])
+
+    for item in table:
+        api_name = str(item.get("team", {}).get("name") or "")
+        if _normalize_team_name(api_name) != target:
+            continue
+
+        played = int(item.get("playedGames") or 0)
+        if played <= 0:
+            return None
+
+        points = int(item.get("points") or 0)
+        goals_for = int(item.get("goalsFor") or 0)
+        goals_against = int(item.get("goalsAgainst") or 0)
+        goal_difference = int(
+            item.get("goalDifference")
+            if item.get("goalDifference") is not None
+            else goals_for - goals_against
+        )
+        return {
+            "team": profile["name"],
+            "league": profile["league"],
+            "played": played,
+            "points": points,
+            "position": int(item.get("position") or 0),
+            "goals_for": goals_for,
+            "goals_against": goals_against,
+            "points_per_game": points / played,
+            "goal_diff_per_game": goal_difference / played,
+        }
+
+    return None
+
+
+def _prediction_strength(
+    season: dict[str, float | int | str] | None,
+    recent: dict[str, float | int | str] | None,
+) -> tuple[float, str]:
+    if season is not None:
+        season_strength = (
+            float(season["points_per_game"])
+            + 0.18 * float(season["goal_diff_per_game"])
+        )
+        if recent is not None:
+            recent_played = int(recent["played"])
+            recent_weight = min(0.35, 0.07 * recent_played)
+            recent_strength = (
+                float(recent["points_per_game"])
+                + 0.20 * float(recent["goal_diff_per_game"])
+            )
+            combined = (
+                (1.0 - recent_weight) * season_strength
+                + recent_weight * recent_strength
+            )
+            return combined, "season + recent form"
+        return season_strength, "season performance"
+
+    if recent is not None:
+        strength = (
+            float(recent["points_per_game"])
+            + 0.20 * float(recent["goal_diff_per_game"])
+        )
+        return strength, "recent form only"
+
+    raise ValueError("No usable performance data was available for this team.")
 
 
 def _clean_web_snippet(value: Any, limit: int = 220) -> str:
@@ -559,56 +671,102 @@ def get_player_injury(player_name: str) -> str:
 
 @tool
 def predict_match(team1: str, team2: str) -> str:
-    """Estimate a match outcome only when enough recent match history is available."""
+    """Estimate a football match outcome using season performance plus available recent form."""
     try:
-        first = _form_summary(team1)
-        second = _form_summary(team2)
+        first_season = None
+        second_season = None
+        first_recent = None
+        second_recent = None
 
-        first_played = int(first["played"])
-        second_played = int(second["played"])
-        minimum_matches = 3
+        try:
+            first_season = _season_team_summary(team1)
+        except Exception:
+            pass
+        try:
+            second_season = _season_team_summary(team2)
+        except Exception:
+            pass
+        try:
+            first_recent = _form_summary(team1)
+        except Exception:
+            pass
+        try:
+            second_recent = _form_summary(team2)
+        except Exception:
+            pass
 
-        if first_played < minimum_matches or second_played < minimum_matches:
-            return (
-                f"I don't have enough recent match history to produce a reliable "
-                f"form-based outlook for {first['team']} vs {second['team']}.\n"
-                f"- {first['team']}: {first_played} recent "
-                f"{'match' if first_played == 1 else 'matches'} available\n"
-                f"- {second['team']}: {second_played} recent "
-                f"{'match' if second_played == 1 else 'matches'} available\n"
-                f"I need at least {minimum_matches} recent matches for each team "
-                "before calculating probabilities."
-            )
+        first_strength, first_source = _prediction_strength(
+            first_season,
+            first_recent,
+        )
+        second_strength, second_source = _prediction_strength(
+            second_season,
+            second_recent,
+        )
 
-        first_strength = float(first["points_per_game"]) + 0.20 * float(first["goal_diff_per_game"])
-        second_strength = float(second["points_per_game"]) + 0.20 * float(second["goal_diff_per_game"])
+        # Treat the first-listed team as the home side and apply a small,
+        # transparent home-field adjustment.
+        home_advantage = 0.12
+        first_strength += home_advantage
+
         first_prob, draw_prob, second_prob = _prediction_probabilities(
             first_strength,
             second_strength,
         )
 
+        first_name = str(
+            (first_season or first_recent or {"team": team1})["team"]
+        )
+        second_name = str(
+            (second_season or second_recent or {"team": team2})["team"]
+        )
+
         outcomes = {
-            str(first["team"]): first_prob,
+            first_name: first_prob,
             "Draw": draw_prob,
-            str(second["team"]): second_prob,
+            second_name: second_prob,
         }
         likely_outcome = max(outcomes, key=outcomes.get)
+        margin = sorted(outcomes.values(), reverse=True)
+        gap = margin[0] - margin[1]
+        confidence = "medium" if gap >= 0.10 else "low"
+
+        evidence_lines = []
+        for name, season, recent, source in (
+            (first_name, first_season, first_recent, first_source),
+            (second_name, second_season, second_recent, second_source),
+        ):
+            details = []
+            if season is not None:
+                details.append(
+                    f"{season['points']} pts from {season['played']} league matches"
+                )
+                details.append(f"position {season['position']}")
+            if recent is not None:
+                details.append(
+                    f"recent sample {recent['wins']}W {recent['draws']}D "
+                    f"{recent['losses']}L from {recent['played']} "
+                    f"{'match' if int(recent['played']) == 1 else 'matches'}"
+                )
+            evidence_lines.append(
+                f"- {name}: {source}; " + "; ".join(details)
+            )
 
         return (
-            f"Data-driven match outlook: {first['team']} vs {second['team']}\n\n"
-            f"{first['team']} recent form ({first_played} matches): "
-            f"{first['wins']}W {first['draws']}D {first['losses']}L\n"
-            f"{second['team']} recent form ({second_played} matches): "
-            f"{second['wins']}W {second['draws']}D {second['losses']}L\n\n"
-            "Estimated probabilities:\n"
-            f"- {first['team']}: {first_prob * 100:.1f}%\n"
+            f"Match prediction: {first_name} vs {second_name}\n\n"
+            "Data used:\n"
+            + "\n".join(evidence_lines)
+            + "\n\nEstimated probabilities:\n"
+            f"- {first_name}: {first_prob * 100:.1f}%\n"
             f"- Draw: {draw_prob * 100:.1f}%\n"
-            f"- {second['team']}: {second_prob * 100:.1f}%\n\n"
-            f"Most likely outcome: {likely_outcome}\n"
-            "This is a simple form-based estimate, not a guaranteed result or betting model."
+            f"- {second_name}: {second_prob * 100:.1f}%\n\n"
+            f"Prediction: {likely_outcome}\n"
+            f"Confidence: {confidence}\n\n"
+            "The first-listed team receives a small home-field adjustment. "
+            "This is a statistical estimate, not a guaranteed result or betting advice."
         )
     except Exception as exc:
-        return f"I couldn't generate a match outlook right now: {exc}"
+        return f"I couldn't generate a match prediction right now: {exc}"
 
 
 @tool
