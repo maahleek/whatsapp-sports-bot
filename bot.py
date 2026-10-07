@@ -19,7 +19,7 @@ from tavily import TavilyClient
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 
-from rag import search_knowledge
+from rag import lookup_betting_term, search_knowledge
 
 load_dotenv()
 
@@ -482,6 +482,153 @@ def _asian_handicap_probabilities(
     return win, push, loss
 
 
+def _split_quarter_line(line: float) -> tuple[float, float] | None:
+    """Split a quarter line into the two adjacent half/whole lines."""
+    scaled = round(line * 4)
+    if abs(line * 4 - scaled) > 1e-9 or scaled % 2 == 0:
+        return None
+    lower = math.floor(line * 2) / 2.0
+    upper = math.ceil(line * 2) / 2.0
+    return lower, upper
+
+
+def _asian_handicap_settlement(
+    matrix: list[tuple[int, int, float]],
+    line: float,
+    *,
+    side: str,
+) -> dict[str, float]:
+    """Return full/half win, push, and full/half loss probabilities."""
+    split = _split_quarter_line(line)
+    if split is None:
+        win, push, loss = _asian_handicap_probabilities(matrix, line, side=side)
+        return {
+            "full_win": win,
+            "half_win": 0.0,
+            "push": push,
+            "half_loss": 0.0,
+            "full_loss": loss,
+        }
+
+    first_line, second_line = split
+    totals = {
+        "full_win": 0.0,
+        "half_win": 0.0,
+        "push": 0.0,
+        "half_loss": 0.0,
+        "full_loss": 0.0,
+    }
+
+    for home_goals, away_goals, probability in matrix:
+        goal_difference = home_goals - away_goals
+
+        def outcome(component: float) -> int:
+            adjusted = (
+                goal_difference + component
+                if side == "home"
+                else -goal_difference + component
+            )
+            if adjusted > 0:
+                return 1
+            if adjusted < 0:
+                return -1
+            return 0
+
+        outcomes = (outcome(first_line), outcome(second_line))
+        if outcomes == (1, 1):
+            totals["full_win"] += probability
+        elif 1 in outcomes and 0 in outcomes:
+            totals["half_win"] += probability
+        elif outcomes == (0, 0):
+            totals["push"] += probability
+        elif -1 in outcomes and 0 in outcomes:
+            totals["half_loss"] += probability
+        elif outcomes == (-1, -1):
+            totals["full_loss"] += probability
+        else:
+            # Defensive fallback for an unusual split result.
+            totals["push"] += probability
+
+    return totals
+
+
+def _total_line_settlement(
+    matrix: list[tuple[int, int, float]],
+    line: float,
+    *,
+    side: str,
+) -> dict[str, float]:
+    """Return settlement probabilities for over/under whole, half, and quarter totals."""
+    split = _split_quarter_line(line)
+    if split is None:
+        win = push = loss = 0.0
+        for home_goals, away_goals, probability in matrix:
+            total = home_goals + away_goals
+            adjusted = total - line if side == "over" else line - total
+            if adjusted > 0:
+                win += probability
+            elif adjusted == 0:
+                push += probability
+            else:
+                loss += probability
+        return {
+            "full_win": win,
+            "half_win": 0.0,
+            "push": push,
+            "half_loss": 0.0,
+            "full_loss": loss,
+        }
+
+    first_line, second_line = split
+    totals = {
+        "full_win": 0.0,
+        "half_win": 0.0,
+        "push": 0.0,
+        "half_loss": 0.0,
+        "full_loss": 0.0,
+    }
+    for home_goals, away_goals, probability in matrix:
+        total = home_goals + away_goals
+
+        def outcome(component: float) -> int:
+            adjusted = total - component if side == "over" else component - total
+            if adjusted > 0:
+                return 1
+            if adjusted < 0:
+                return -1
+            return 0
+
+        outcomes = (outcome(first_line), outcome(second_line))
+        if outcomes == (1, 1):
+            totals["full_win"] += probability
+        elif 1 in outcomes and 0 in outcomes:
+            totals["half_win"] += probability
+        elif outcomes == (0, 0):
+            totals["push"] += probability
+        elif -1 in outcomes and 0 in outcomes:
+            totals["half_loss"] += probability
+        elif outcomes == (-1, -1):
+            totals["full_loss"] += probability
+        else:
+            totals["push"] += probability
+    return totals
+
+
+def _format_settlement(label: str, settlement: dict[str, float]) -> str:
+    parts = []
+    for key, text_label in (
+        ("full_win", "win"),
+        ("half_win", "half-win"),
+        ("push", "push"),
+        ("half_loss", "half-loss"),
+        ("full_loss", "lose"),
+    ):
+        value = settlement[key]
+        if value > 0.0001:
+            parts.append(f"{text_label} {value * 100:.1f}%")
+    return f"- {label}: " + ", ".join(parts)
+
+
 def _betting_market_report(context: dict[str, Any], market_request: str = "all") -> str:
     """Build neutral market-probability estimates from the score distribution."""
     home, away, matrix = _fixture_order_projection(context)
@@ -563,7 +710,19 @@ def _betting_market_report(context: dict[str, Any], market_request: str = "all")
             ]
         )
 
-    if wants_all or "over" in request or "under" in request or "total" in request:
+    total_match = re.search(r"\b(over|under)\s*([0-9]+(?:\.[0-9]+)?)", request)
+    if total_match and not wants_all:
+        side = total_match.group(1)
+        line = float(total_match.group(2))
+        settlement = _total_line_settlement(matrix, line, side=side)
+        lines.extend(
+            [
+                "Total goals:",
+                _format_settlement(f"{side.title()} {line:g}", settlement),
+                "",
+            ]
+        )
+    elif wants_all or "over" in request or "under" in request or "total" in request:
         lines.append("Total goals:")
         for line in (0.5, 1.5, 2.5, 3.5, 4.5):
             over = over_probability(line)
@@ -596,19 +755,42 @@ def _betting_market_report(context: dict[str, Any], market_request: str = "all")
             ]
         )
 
-    if wants_all or "handicap" in request:
+    handicap_match = re.search(
+        r"([+-]?\d+(?:\.\d+)?)\s*(?:asian\s+)?handicap|"
+        r"(?:asian\s+)?handicap\s*([+-]?\d+(?:\.\d+)?)",
+        request,
+    )
+    if handicap_match and not wants_all:
+        raw_line = handicap_match.group(1) or handicap_match.group(2)
+        line = float(raw_line)
+        requested_side = None
+        home_key = _normalize_team_name(home)
+        away_key = _normalize_team_name(away)
+        request_team_key = _normalize_team_name(request)
+        if home_key and home_key in request_team_key:
+            requested_side = (home, "home")
+        elif away_key and away_key in request_team_key:
+            requested_side = (away, "away")
+
+        sides = [requested_side] if requested_side else [(home, "home"), (away, "away")]
+        lines.append("Asian handicap:")
+        for side_name, side_key in sides:
+            settlement = _asian_handicap_settlement(matrix, line, side=side_key)
+            lines.append(
+                _format_settlement(f"{side_name} {line:+g}", settlement)
+            )
+        lines.append("")
+    elif wants_all or "handicap" in request:
         lines.append("Common Asian handicap lines:")
         for side_name, side_key in ((home, "home"), (away, "away")):
-            for line in (-1.5, -1.0, -0.5, 0.5, 1.0, 1.5):
-                win, push, loss = _asian_handicap_probabilities(
+            for line in (-1.5, -1.0, -0.75, -0.5, -0.25, 0.25, 0.5, 0.75, 1.0, 1.5):
+                settlement = _asian_handicap_settlement(
                     matrix,
                     line,
                     side=side_key,
                 )
-                push_text = f", push {push * 100:.1f}%" if push > 0.0001 else ""
                 lines.append(
-                    f"- {side_name} {line:+.1f}: win {win * 100:.1f}%"
-                    f"{push_text}, lose {loss * 100:.1f}%"
+                    _format_settlement(f"{side_name} {line:+g}", settlement)
                 )
         lines.append("")
 
@@ -1273,14 +1455,18 @@ def predict_betting_markets(team1: str, team2: str, market: str = "all") -> str:
 def search_betting_knowledge(question: str) -> str:
     """Explain football betting terms and market settlement using the local knowledge base."""
     try:
+        exact = lookup_betting_term(question)
+        if exact:
+            return "Betting term explanation:\n\n" + exact
+
         passages = search_knowledge(
             question,
-            k=2,
+            k=1,
             category="betting_terms",
         )
         if not passages:
             return "No relevant betting term was found in the local knowledge base."
-        return "Betting term explanation:\n\n" + "\n\n".join(passages)
+        return "Betting term explanation:\n\n" + passages[0]
     except Exception as exc:
         return f"I couldn't search the betting terminology knowledge base right now: {exc}"
 
