@@ -7,34 +7,45 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-KNOWLEDGE_FILE = Path("football_knowledge.txt")
+KNOWLEDGE_FILES = {
+    "football_rules": Path("football_knowledge.txt"),
+    "betting_terms": Path("betting_knowledge.txt"),
+}
 VECTOR_DIR = Path("football_db")
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
-def _load_knowledge_text() -> str:
-    if not KNOWLEDGE_FILE.exists():
-        raise FileNotFoundError(
-            "football_knowledge.txt is missing. Add the knowledge file before using RAG."
-        )
+def _load_sections(path: Path, category: str) -> list[Document]:
+    if not path.exists():
+        raise FileNotFoundError(f"{path.name} is missing.")
 
-    text = KNOWLEDGE_FILE.read_text(encoding="utf-8").strip()
+    text = path.read_text(encoding="utf-8").strip()
     if not text:
-        raise ValueError("football_knowledge.txt is empty.")
-    return text
+        raise ValueError(f"{path.name} is empty.")
 
-
-def rebuild_knowledge_base() -> int:
-    text = _load_knowledge_text()
     sections = [
         section.strip()
         for section in text.split("\n\n")
-        if section.strip() and section.strip() != "FOOTBALL RULES AND REGULATIONS"
+        if section.strip()
+        and section.strip() not in {
+            "FOOTBALL RULES AND REGULATIONS",
+            "FOOTBALL BETTING TERMS AND MARKETS",
+        }
     ]
-    documents = [Document(page_content=section) for section in sections]
+    return [
+        Document(page_content=section, metadata={"category": category})
+        for section in sections
+    ]
+
+
+def rebuild_knowledge_base() -> int:
+    documents: list[Document] = []
+    for category, path in KNOWLEDGE_FILES.items():
+        documents.extend(_load_sections(path, category))
+
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=320,
-        chunk_overlap=20,
+        chunk_size=420,
+        chunk_overlap=30,
         separators=["\n\n", "\n", ". ", " "],
     )
     chunks = splitter.split_documents(documents)
@@ -67,9 +78,17 @@ def get_vectorstore() -> Chroma:
     )
 
 
-def search_knowledge(question: str, k: int = 1) -> list[str]:
+def search_knowledge(
+    question: str,
+    k: int = 1,
+    category: str | None = None,
+) -> list[str]:
     if not question.strip():
         return []
 
-    results = get_vectorstore().similarity_search(question, k=k)
+    kwargs = {"k": k}
+    if category:
+        kwargs["filter"] = {"category": category}
+
+    results = get_vectorstore().similarity_search(question, **kwargs)
     return [document.page_content for document in results]
