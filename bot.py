@@ -306,20 +306,47 @@ def _find_upcoming_fixture(team1: str, team2: str) -> dict[str, str] | None:
     """Find an upcoming fixture between two teams and identify the real home side."""
     first = _team_profile(team1)
     second = _team_profile(team2)
+    first_name = _normalize_team_name(first["name"])
+    second_name = _normalize_team_name(second["name"])
+
+    # Prefer the structured competition schedule when both teams are in the same supported league.
+    first_code = _league_code(first["league"])
+    second_code = _league_code(second["league"])
+    if first_code and first_code == second_code:
+        try:
+            data = _safe_get_json(
+                f"{FOOTBALL_DATA_BASE_URL}/competitions/{first_code}/matches",
+                headers=_football_data_headers(),
+                params={"status": "SCHEDULED"},
+            )
+            for match in data.get("matches") or []:
+                home = str(match.get("homeTeam", {}).get("name") or "")
+                away = str(match.get("awayTeam", {}).get("name") or "")
+                if {
+                    _normalize_team_name(home),
+                    _normalize_team_name(away),
+                } != {first_name, second_name}:
+                    continue
+                return {
+                    "home": home,
+                    "away": away,
+                    "date": str(match.get("utcDate") or "")[:10],
+                }
+        except Exception:
+            pass
+
+    # Fall back to TheSportsDB upcoming events.
     data = _safe_get_json(
         f"{SPORTSDB_BASE_URL}/eventsnext.php",
         params={"id": first["id"]},
     )
-    events = data.get("events") or []
-    first_name = _normalize_team_name(first["name"])
-    second_name = _normalize_team_name(second["name"])
-
-    for event in events:
+    for event in data.get("events") or []:
         home = str(event.get("strHomeTeam") or "")
         away = str(event.get("strAwayTeam") or "")
-        home_norm = _normalize_team_name(home)
-        away_norm = _normalize_team_name(away)
-        if {home_norm, away_norm} != {first_name, second_name}:
+        if {
+            _normalize_team_name(home),
+            _normalize_team_name(away),
+        } != {first_name, second_name}:
             continue
         return {
             "home": home,
@@ -327,7 +354,6 @@ def _find_upcoming_fixture(team1: str, team2: str) -> dict[str, str] | None:
             "date": str(event.get("dateEvent") or ""),
         }
     return None
-
 
 def _scoring_rates(
     season: dict[str, float | int | str] | None,
