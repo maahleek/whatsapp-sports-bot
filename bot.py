@@ -187,6 +187,28 @@ def _clean_web_snippet(value: Any, limit: int = 220) -> str:
     return text
 
 
+def _relevant_sentences(value: Any, terms: tuple[str, ...], limit: int = 200) -> str:
+    """Keep only useful sentences from noisy search-result text."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    lowered_terms = tuple(term.casefold() for term in terms)
+    relevant = [
+        sentence.strip()
+        for sentence in sentences
+        if any(term in sentence.casefold() for term in lowered_terms)
+    ]
+    selected = " ".join(relevant[:2]).strip()
+    if not selected:
+        return ""
+
+    selected = selected.replace("**", "").replace("`", "")
+    if len(selected) > limit:
+        selected = selected[: limit - 3].rstrip() + "..."
+    return selected
+
 def _extract_player_records(payload: Any) -> list[dict[str, Any]]:
     """Handle the different response shapes returned by the player-search API."""
     if isinstance(payload, list):
@@ -501,26 +523,38 @@ def get_player_injury(player_name: str) -> str:
         tavily = TavilyClient(api_key=_require_env("TAVILY_API_KEY"))
         year = datetime.now(timezone.utc).year
         results = tavily.search(
-            query=f"{player_name} injury update football {year}",
-            max_results=3,
+            query=f"{player_name} injury update return training status football {year}",
+            max_results=4,
         )
         items = results.get("results") or []
         if not items:
             return f"No recent injury news was found for {player_name}."
 
-        lines = [f"Injury update for {player_name}:"]
+        surname = player_name.strip().split()[-1] if player_name.strip() else player_name
+        terms = (surname, "injury", "return", "training", "fitness", "out", "available")
+        lines = [f"Latest injury sources for {player_name}:"]
+        added = 0
         for item in items:
-            snippet = _clean_web_snippet(item.get("content"), 180)
+            snippet = _relevant_sentences(item.get("content"), terms, 190)
             url = str(item.get("url") or "").strip()
-            entry = f"- {item.get('title', 'Untitled')}"
+            title = str(item.get("title") or "Untitled").strip()
+            if not snippet and not url:
+                continue
+            entry = f"- {title}"
             if snippet:
                 entry += f"\n  {snippet}"
             if url:
                 entry += f"\n  Source: {url}"
             lines.append(entry)
+            added += 1
+            if added >= 3:
+                break
+
+        if added == 0:
+            return f"I found search results for {player_name}, but none had a clean injury update I could verify."
         return "\n\n".join(lines)
     except Exception as exc:
-        return f"I couldn't search injury information right now: {exc}"
+        return f"I couldn\'t search injury information right now: {exc}"
 
 
 @tool
