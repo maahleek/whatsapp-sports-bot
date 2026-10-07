@@ -1758,6 +1758,81 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
                 )
             )
 
+    total_market_match = re.match(
+        r"^(over|under)\s+([0-9]+(?:\.[0-9]+)?)\s+"
+        r"(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:[?.!]|$)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if total_market_match:
+        side = total_market_match.group(1).title()
+        line = total_market_match.group(2)
+        team1 = total_market_match.group(3).strip()
+        team2 = total_market_match.group(4).strip()
+
+        _remember_matchup(user_id, team1, team2)
+
+        return str(
+            predict_betting_markets.invoke(
+                {
+                    "team1": team1,
+                    "team2": team2,
+                    "market": f"{side} {line}",
+                }
+            )
+        )
+
+    handicap_selection_match = re.match(
+        r"^(.+?)\s+([+-]\d+(?:\.\d+)?)\s+"
+        r"(?:asian\s+)?handicap\s+"
+        r"(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:[?.!]|$)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if handicap_selection_match:
+        selection = handicap_selection_match.group(1).strip()
+        line = handicap_selection_match.group(2)
+        team1 = handicap_selection_match.group(3).strip()
+        team2 = handicap_selection_match.group(4).strip()
+
+        _remember_matchup(user_id, team1, team2)
+
+        return str(
+            predict_betting_markets.invoke(
+                {
+                    "team1": team1,
+                    "team2": team2,
+                    "market": f"{selection} {line} Asian Handicap",
+                }
+            )
+        )
+
+    general_market_match = re.match(
+        r"^(1x2|moneyline|asian handicap|"
+        r"double chance(?:\s+(?:1x|x2|12))?|"
+        r"(?:btts|both teams to score)(?:\s+(?:yes|no))?|"
+        r"draw no bet|dnb|clean sheet|win to nil)\s+"
+        r"(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:[?.!]|$)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if general_market_match:
+        market = general_market_match.group(1).strip()
+        team1 = general_market_match.group(2).strip()
+        team2 = general_market_match.group(3).strip()
+
+        _remember_matchup(user_id, team1, team2)
+
+        return str(
+            predict_betting_markets.invoke(
+                {
+                    "team1": team1,
+                    "team2": team2,
+                    "market": market,
+                }
+            )
+        )
+    
     exact_score_match = re.search(
         r"(?:correct|exact)\s+score(?:\s+(?:for|between))?\s+(.+?)\s+(?:vs\.?|versus|and)\s+(.+?)(?:[?.!]|$)",
         normalized,
