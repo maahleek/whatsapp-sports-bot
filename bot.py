@@ -1246,10 +1246,45 @@ def predict_correct_score(team1: str, team2: str) -> str:
 
 
 @tool
+def predict_betting_markets(team1: str, team2: str, market: str = "all") -> str:
+    """Estimate common football betting-market probabilities for a matchup."""
+    try:
+        context = _build_prediction_context(team1, team2)
+        if context.get("projection") is None:
+            return (
+                f"I can estimate the match outcome for {team1} vs {team2}, "
+                "but I do not have enough scoring data to model betting markets."
+            )
+        return _betting_market_report(context, market)
+    except Exception as exc:
+        return f"I couldn't generate betting-market probabilities right now: {exc}"
+
+
+@tool
+def search_betting_knowledge(question: str) -> str:
+    """Explain football betting terms and market settlement using the local knowledge base."""
+    try:
+        passages = search_knowledge(
+            question,
+            k=2,
+            category="betting_terms",
+        )
+        if not passages:
+            return "No relevant betting term was found in the local knowledge base."
+        return "Betting term explanation:\n\n" + "\n\n".join(passages)
+    except Exception as exc:
+        return f"I couldn't search the betting terminology knowledge base right now: {exc}"
+
+
+@tool
 def search_football_knowledge(question: str) -> str:
     """Search the local football rules knowledge base using semantic retrieval."""
     try:
-        passages = search_knowledge(question, k=1)
+        passages = search_knowledge(
+            question,
+            k=1,
+            category="football_rules",
+        )
         if not passages:
             return "No relevant information was found in the football knowledge base."
         return "From the football knowledge base:\n\n" + "\n\n".join(passages)
@@ -1363,6 +1398,8 @@ TOOLS = [
     get_player_injury,
     predict_match,
     predict_correct_score,
+    predict_betting_markets,
+    search_betting_knowledge,
     search_football_knowledge,
     get_league_fixtures,
     get_head_to_head,
@@ -1393,14 +1430,16 @@ Rules:
 2. Never expose function names, tool calls, XML, JSON, internal reasoning, or code to the user.
 3. Use the football knowledge-base tool for rules such as offside, VAR, cards, and penalties.
 4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
-5. Use the match prediction tool when the user asks who is likely to win, and use the correct-score projection tool when the user asks for an exact or correct score. Clearly present both as estimates, not guaranteed results.
-6. Keep WhatsApp responses concise, readable, and conversational.
-7. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
-8. Never invent, infer, reconstruct, or embellish statistics that were not returned by a tool in the current turn. Do not add xG, shot counts, possession, table positions, points, goals, or other metrics unless a current-turn tool explicitly returned them.
-9. Never reuse numeric sports data from conversation memory as if it were current. For standings, results, fixtures, form, injuries, scorers, or stats, current-turn tool output is the only authoritative source.
-10. If a standings tool says the structured table is unavailable, do not build a partial table from web snippets and do not fill missing rows with guesses or dashes.
-11. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on. Do not describe one or two matches as proof of "good form", "bad form", title contention, or another broad conclusion.
-12. If a tool reports that data is unavailable, say so rather than inventing an answer.
+5. Use the match prediction tool when the user asks who is likely to win, the correct-score projection tool for exact-score requests, and the betting-market probability tool for markets such as 1X2, double chance, draw no bet, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score.
+6. Use the betting terminology knowledge-base tool when the user asks what a betting term or market means, including Asian handicap, double chance, draw no bet, BTTS, over/under, accumulators, push/void, and similar terms.
+7. Betting-market outputs are statistical probability estimates only. Never promise a guaranteed win, call a selection risk-free, or recommend a stake size or bankroll percentage.
+8. Keep WhatsApp responses concise, readable, and conversational.
+9. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
+10. Never invent, infer, reconstruct, or embellish statistics that were not returned by a tool in the current turn. Do not add xG, shot counts, possession, table positions, points, goals, or other metrics unless a current-turn tool explicitly returned them.
+11. Never reuse numeric sports data from conversation memory as if it were current. For standings, results, fixtures, form, injuries, scorers, or stats, current-turn tool output is the only authoritative source.
+12. If a standings tool says the structured table is unavailable, do not build a partial table from web snippets and do not fill missing rows with guesses or dashes.
+13. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on. Do not describe one or two matches as proof of "good form", "bad form", title contention, or another broad conclusion.
+14. If a tool reports that data is unavailable, say so rather than inventing an answer.
 """.strip()
 
     return create_react_agent(
