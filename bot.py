@@ -186,9 +186,18 @@ def _football_data_headers() -> dict[str, str]:
 
 def _normalize_team_name(name: str) -> str:
     normalized = re.sub(r"[^a-z0-9 ]+", " ", name.casefold())
+    tokens = normalized.split()
+
+    # Handle dotted club suffixes such as F.C., A.F.C., and C.F.,
+    # which become separate single-letter tokens after punctuation removal.
+    for suffix in (["a", "f", "c"], ["f", "c"], ["c", "f"]):
+        if tokens[-len(suffix):] == suffix:
+            tokens = tokens[:-len(suffix)]
+            break
+
     tokens = [
         token
-        for token in normalized.split()
+        for token in tokens
         if token not in {"fc", "afc", "cf", "club", "football"}
     ]
     return " ".join(tokens)
