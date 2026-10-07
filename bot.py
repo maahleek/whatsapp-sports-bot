@@ -1524,6 +1524,45 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     if any(keyword in lowered for keyword in rule_keywords):
         return str(search_football_knowledge.invoke({"question": normalized}))
 
+    betting_terms = (
+        "1x2", "moneyline", "double chance", "draw no bet", "dnb",
+        "btts", "both teams to score", "over/under", "over under",
+        "asian handicap", "european handicap", "team total",
+        "clean sheet", "win to nil", "half-time/full-time",
+        "half time full time", "accumulator", "parlay", "bet builder",
+        "push", "void bet", "half win", "half loss", "cash out",
+        "implied probability", "betting odds", "stake", "return", "profit",
+    )
+
+    betting_prediction_match = re.search(
+        r"(?:betting prediction|bet prediction|betting markets|market prediction|all betting predictions)"
+        r"(?:\s+for)?\s+(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:[?.!]|$)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if betting_prediction_match:
+        team1 = betting_prediction_match.group(1).strip()
+        team2 = betting_prediction_match.group(2).strip()
+        _remember_matchup(user_id, team1, team2)
+        return str(
+            predict_betting_markets.invoke(
+                {"team1": team1, "team2": team2, "market": "all"}
+            )
+        )
+
+    if (
+        ("betting prediction" in lowered or "bet predictions" in lowered or "betting markets" in lowered)
+        and ("them" in lowered or "between them" in lowered)
+    ):
+        matchup = _last_matchup(user_id)
+        if matchup is not None:
+            team1, team2 = matchup
+            return str(
+                predict_betting_markets.invoke(
+                    {"team1": team1, "team2": team2, "market": "all"}
+                )
+            )
+
     exact_score_match = re.search(
         r"(?:correct|exact)\s+score(?:\s+(?:for|between))?\s+(.+?)\s+(?:vs\.?|versus|and)\s+(.+?)(?:[?.!]|$)",
         normalized,
@@ -1554,6 +1593,10 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
         _remember_matchup(user_id, team1, team2)
         return str(predict_match.invoke({"team1": team1, "team2": team2}))
 
+    # Pure terminology questions can be answered locally without live sports data.
+    if " vs " not in lowered and any(term in lowered for term in betting_terms):
+        return str(search_betting_knowledge.invoke({"question": normalized}))
+
     return None
 
 def _requires_current_tool_data(message: str) -> bool:
@@ -1564,6 +1607,9 @@ def _requires_current_tool_data(message: str) -> bool:
         "recent", "form", "top scorer", "scorer", "player", "injury",
         "transfer", "news", "head-to-head", "head to head", "stats",
         "statistics", "predict", "prediction", "who will win",
+        "betting prediction", "bet predictions", "betting markets",
+        "btts", "both teams to score", "double chance", "draw no bet",
+        "asian handicap", "team total",
     )
     return any(keyword in lowered for keyword in keywords)
 
