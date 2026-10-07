@@ -3,6 +3,9 @@ from bot import (
     _normalize_team_name,
     _prediction_probabilities,
     _prediction_strength,
+    _score_projection,
+    _remember_matchup,
+    _last_matchup,
 )
 
 
@@ -47,9 +50,33 @@ def test_prediction_strength_can_use_season_with_small_recent_sample():
     assert source == "season + recent form"
 
 
+def test_poisson_score_projection_is_normalized():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    total = (
+        projection["first_win"]
+        + projection["draw"]
+        + projection["second_win"]
+    )
+    assert abs(total - 1.0) < 1e-9
+    assert len(projection["top_scores"]) == 3
+    assert all(item[0] >= 0 and item[1] >= 0 for item in projection["top_scores"])
+
+
+def test_matchup_context_for_followups():
+    user_id = "test-user"
+    _remember_matchup(user_id, "Arsenal", "Liverpool")
+    assert _last_matchup(user_id) == ("Arsenal", "Liverpool")
+
+
 if __name__ == "__main__":
     test_prediction_probabilities_sum_to_one()
     test_nested_player_search_shape()
     test_team_name_normalization()
     test_prediction_strength_can_use_season_with_small_recent_sample()
+    test_poisson_score_projection_is_normalized()
+    test_matchup_context_for_followups()
     print("API helper tests passed.")
