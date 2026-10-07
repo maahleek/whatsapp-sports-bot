@@ -29,7 +29,7 @@ SPORTSDB_BASE_URL = f"https://www.thesportsdb.com/api/v1/json/{SPORTSDB_API_KEY}
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
 VERIFY_TWILIO_SIGNATURE = os.getenv("VERIFY_TWILIO_SIGNATURE", "false").lower() == "true"
-MEMORY_NAMESPACE = os.getenv("MEMORY_NAMESPACE", "v2")
+MEMORY_NAMESPACE = os.getenv("MEMORY_NAMESPACE", "v3")
 
 _PROCESSED_MESSAGE_SIDS: set[str] = set()
 _PROCESSED_MESSAGE_ORDER: deque[str] = deque()
@@ -480,10 +480,14 @@ def get_top_scorers(league_name: str) -> str:
 
         lines = [f"Top scorers - {league_name.title()}:"]
         for index, scorer in enumerate(scorers[:10], start=1):
+            goals = int(scorer.get("goals") or 0)
+            assists = int(scorer.get("assists") or 0)
+            goal_word = "goal" if goals == 1 else "goals"
+            assist_word = "assist" if assists == 1 else "assists"
             lines.append(
                 f"{index}. {scorer.get('player', {}).get('name', 'Unknown')} "
                 f"({scorer.get('team', {}).get('shortName', 'Unknown')}) - "
-                f"{scorer.get('goals', 0)} goals, {scorer.get('assists') or 0} assists"
+                f"{goals} {goal_word}, {assists} {assist_word}"
             )
         return "\n".join(lines)
     except Exception as exc:
@@ -803,7 +807,51 @@ def _current_turn_tool_outputs(messages: list[Any]) -> list[str]:
     return outputs
 
 
+def _direct_guarded_tool_response(message: str) -> str | None:
+    """Route high-risk factual intents directly to deterministic tools."""
+    normalized = re.sub(r"\s+", " ", message.strip())
+    lowered = normalized.casefold()
+
+    if "correct score" in lowered or "exact score" in lowered:
+        return (
+            "I don't have enough verified data to predict an exact scoreline. "
+            "I can provide a form-based match outlook when enough recent matches are available."
+        )
+
+    rule_keywords = ("offside", "var", "yellow card", "red card", "penalty rule", "penalty kick")
+    if any(keyword in lowered for keyword in rule_keywords):
+        return str(search_football_knowledge.invoke({"question": normalized}))
+
+    prediction_match = re.search(
+        r"\bpredict\s+(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:[?.!]|$)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if prediction_match:
+        team1 = prediction_match.group(1).strip()
+        team2 = prediction_match.group(2).strip()
+        return str(predict_match.invoke({"team1": team1, "team2": team2}))
+
+    return None
+
+
+def _requires_current_tool_data(message: str) -> bool:
+    """Detect requests that should never be answered from stale conversation memory."""
+    lowered = message.casefold()
+    keywords = (
+        "live", "score", "table", "standing", "fixture", "next match",
+        "recent", "form", "top scorer", "scorer", "player", "injury",
+        "transfer", "news", "head-to-head", "head to head", "stats",
+        "statistics", "predict", "prediction", "who will win",
+    )
+    return any(keyword in lowered for keyword in keywords)
+
+
 def ask_agent(message: str, user_id: str) -> str:
+    direct_response = _direct_guarded_tool_response(message)
+    if direct_response is not None:
+        return sanitize_whatsapp_response(direct_response)
+
     result = get_agent().invoke(
         {"messages": [{"role": "user", "content": message}]},
         config={"configurable": {"thread_id": f"{MEMORY_NAMESPACE}:{user_id}"}},
@@ -812,12 +860,14 @@ def ask_agent(message: str, user_id: str) -> str:
     messages = result["messages"]
     tool_outputs = _current_turn_tool_outputs(messages)
 
-    # For factual/tool-backed requests, return the current turn's grounded tool
-    # results instead of allowing the model to add unsupported statistics or
-    # conclusions. The agent still decides which tools to call and memory still
-    # resolves follow-ups such as "their next fixtures".
     if tool_outputs:
         return sanitize_whatsapp_response("\n\n".join(tool_outputs))
+
+    if _requires_current_tool_data(message):
+        return (
+            "I couldn't verify that with a current data source right now. "
+            "Please try again in a moment."
+        )
 
     raw_content = messages[-1].content
     return sanitize_whatsapp_response(_content_to_text(raw_content))
