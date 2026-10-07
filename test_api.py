@@ -1,11 +1,13 @@
 from bot import (
     _asian_handicap_probabilities,
+    _asian_handicap_settlement,
     _betting_market_report,
     _extract_player_records,
     _normalize_team_name,
     _prediction_probabilities,
     _prediction_strength,
     _score_projection,
+    _total_line_settlement,
     _remember_matchup,
     _last_matchup,
 )
@@ -110,6 +112,55 @@ def test_asian_handicap_probabilities_sum_to_one():
     assert abs((win + push + loss) - 1.0) < 1e-9
 
 
+def test_quarter_asian_handicap_settlement_is_normalized():
+    projection = _score_projection(
+        (1.7, 1.1),
+        (1.4, 1.3),
+        first_is_home=True,
+    )
+    settlement = _asian_handicap_settlement(
+        projection["score_matrix"],
+        -0.75,
+        side="home",
+    )
+    assert abs(sum(settlement.values()) - 1.0) < 1e-9
+    assert settlement["half_win"] >= 0.0
+    assert settlement["half_loss"] >= 0.0
+
+
+def test_specific_total_line_settlement_is_normalized():
+    projection = _score_projection(
+        (1.7, 1.1),
+        (1.4, 1.3),
+        first_is_home=True,
+    )
+    settlement = _total_line_settlement(
+        projection["score_matrix"],
+        2.25,
+        side="over",
+    )
+    assert abs(sum(settlement.values()) - 1.0) < 1e-9
+
+
+def test_specific_total_request_is_concise():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    report = _betting_market_report(context, "Over 2.5")
+    assert "Over 2.5" in report
+    assert "Over 3.5" not in report
+
+
 if __name__ == "__main__":
     test_prediction_probabilities_sum_to_one()
     test_nested_player_search_shape()
@@ -119,4 +170,7 @@ if __name__ == "__main__":
     test_matchup_context_for_followups()
     test_betting_market_report_from_score_matrix()
     test_asian_handicap_probabilities_sum_to_one()
+    test_quarter_asian_handicap_settlement_is_normalized()
+    test_specific_total_line_settlement_is_normalized()
+    test_specific_total_request_is_concise()
     print("API helper tests passed.")
