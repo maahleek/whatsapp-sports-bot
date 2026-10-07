@@ -422,6 +422,102 @@ def _last_matchup(user_id: str) -> tuple[str, str] | None:
     with _MATCHUP_CONTEXT_LOCK:
         return _LAST_MATCHUPS.get(user_id)
 
+def _build_prediction_context(team1: str, team2: str) -> dict[str, Any]:
+    """Gather structured season/form data, fixture venue, and score projection."""
+    first_season = second_season = None
+    first_recent = second_recent = None
+
+    try:
+        first_season = _season_team_summary(team1)
+    except Exception:
+        pass
+    try:
+        second_season = _season_team_summary(team2)
+    except Exception:
+        pass
+    try:
+        first_recent = _form_summary(team1)
+    except Exception:
+        pass
+    try:
+        second_recent = _form_summary(team2)
+    except Exception:
+        pass
+
+    first_strength, first_source = _prediction_strength(first_season, first_recent)
+    second_strength, second_source = _prediction_strength(second_season, second_recent)
+
+    first_name = str((first_season or first_recent or {"team": team1})["team"])
+    second_name = str((second_season or second_recent or {"team": team2})["team"])
+
+    fixture = None
+    try:
+        fixture = _find_upcoming_fixture(first_name, second_name)
+    except Exception:
+        fixture = None
+
+    first_is_home: bool | None = None
+    venue_note = "No upcoming head-to-head fixture was found, so no home advantage was applied."
+    if fixture is not None:
+        first_is_home = (
+            _normalize_team_name(fixture["home"]) == _normalize_team_name(first_name)
+        )
+        if first_is_home:
+            first_strength += 0.12
+        else:
+            second_strength += 0.12
+        date_text = f" on {fixture['date']}" if fixture.get("date") else ""
+        venue_note = f"Fixture: {fixture['home']} vs {fixture['away']}{date_text}."
+
+    first_rates = _scoring_rates(first_season, first_recent)
+    second_rates = _scoring_rates(second_season, second_recent)
+    projection = None
+    if first_rates is not None and second_rates is not None:
+        projection = _score_projection(
+            first_rates,
+            second_rates,
+            first_is_home=first_is_home,
+        )
+        first_prob = float(projection["first_win"])
+        draw_prob = float(projection["draw"])
+        second_prob = float(projection["second_win"])
+        probability_source = "Poisson scoring model"
+    else:
+        first_prob, draw_prob, second_prob = _prediction_probabilities(
+            first_strength,
+            second_strength,
+        )
+        probability_source = "strength model"
+
+    outcomes = {
+        first_name: first_prob,
+        "Draw": draw_prob,
+        second_name: second_prob,
+    }
+    likely_outcome = max(outcomes, key=outcomes.get)
+    ordered = sorted(outcomes.values(), reverse=True)
+    gap = ordered[0] - ordered[1]
+    confidence = "high" if gap >= 0.20 else "medium" if gap >= 0.10 else "low"
+
+    return {
+        "first_name": first_name,
+        "second_name": second_name,
+        "first_season": first_season,
+        "second_season": second_season,
+        "first_recent": first_recent,
+        "second_recent": second_recent,
+        "first_source": first_source,
+        "second_source": second_source,
+        "first_probability": first_prob,
+        "draw_probability": draw_prob,
+        "second_probability": second_prob,
+        "likely_outcome": likely_outcome,
+        "confidence": confidence,
+        "venue_note": venue_note,
+        "projection": projection,
+        "probability_source": probability_source,
+    }
+
 def _clean_web_snippet(value: Any, limit: int = 220) -> str:
     """Collapse noisy search-result text into a short plain-text snippet."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
