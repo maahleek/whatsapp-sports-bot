@@ -432,7 +432,199 @@ def _score_projection(
         "draw": draw,
         "second_win": second_win,
         "top_scores": top_scores,
+        "score_matrix": normalized,
     }
+
+
+def _fixture_order_projection(context: dict[str, Any]) -> tuple[str, str, list[tuple[int, int, float]]]:
+    """Return home/away labels and the score matrix in actual fixture order."""
+    projection = context.get("projection")
+    if projection is None:
+        raise ValueError("No score projection is available.")
+
+    matrix = list(projection["score_matrix"])
+    fixture = context.get("fixture")
+    first_name = str(context["first_name"])
+    second_name = str(context["second_name"])
+    first_is_home = context.get("first_is_home")
+
+    if fixture is not None and first_is_home is False:
+        swapped = [(second_goals, first_goals, p) for first_goals, second_goals, p in matrix]
+        return str(fixture["home"]), str(fixture["away"]), swapped
+
+    if fixture is not None:
+        return str(fixture["home"]), str(fixture["away"]), matrix
+
+    return first_name, second_name, matrix
+
+
+def _asian_handicap_probabilities(
+    matrix: list[tuple[int, int, float]],
+    line: float,
+    *,
+    side: str,
+) -> tuple[float, float, float]:
+    """Return full-win, push, and loss probabilities for whole/half Asian lines."""
+    win = push = loss = 0.0
+    for home_goals, away_goals, probability in matrix:
+        goal_difference = home_goals - away_goals
+        adjusted = (
+            goal_difference + line
+            if side == "home"
+            else -goal_difference + line
+        )
+        if adjusted > 0:
+            win += probability
+        elif adjusted == 0:
+            push += probability
+        else:
+            loss += probability
+    return win, push, loss
+
+
+def _betting_market_report(context: dict[str, Any], market_request: str = "all") -> str:
+    """Build neutral market-probability estimates from the score distribution."""
+    home, away, matrix = _fixture_order_projection(context)
+    request = (market_request or "all").casefold()
+
+    home_win = sum(p for h, a, p in matrix if h > a)
+    draw = sum(p for h, a, p in matrix if h == a)
+    away_win = sum(p for h, a, p in matrix if h < a)
+    btts_yes = sum(p for h, a, p in matrix if h > 0 and a > 0)
+    btts_no = 1.0 - btts_yes
+
+    def over_probability(line: float) -> float:
+        return sum(p for h, a, p in matrix if h + a > line)
+
+    def home_over(line: float) -> float:
+        return sum(p for h, _a, p in matrix if h > line)
+
+    def away_over(line: float) -> float:
+        return sum(p for _h, a, p in matrix if a > line)
+
+    home_clean = sum(p for _h, a, p in matrix if a == 0)
+    away_clean = sum(p for h, _a, p in matrix if h == 0)
+    home_win_nil = sum(p for h, a, p in matrix if h > a and a == 0)
+    away_win_nil = sum(p for h, a, p in matrix if a > h and h == 0)
+
+    top_scores = sorted(matrix, key=lambda item: item[2], reverse=True)[:3]
+
+    lines = [
+        f"Betting-market probability sheet: {home} vs {away}",
+        context["venue_note"],
+        "",
+    ]
+
+    wants_all = request.strip() in {"", "all"} or any(
+        phrase in request
+        for phrase in ("betting prediction", "bet prediction", "market prediction", "betting markets")
+    )
+
+    if wants_all or any(term in request for term in ("1x2", "match result", "moneyline", "winner")):
+        lines.extend(
+            [
+                "1X2 / Match result:",
+                f"- 1 ({home}): {home_win * 100:.1f}%",
+                f"- X (Draw): {draw * 100:.1f}%",
+                f"- 2 ({away}): {away_win * 100:.1f}%",
+                "",
+            ]
+        )
+
+    if wants_all or "double chance" in request:
+        lines.extend(
+            [
+                "Double chance:",
+                f"- 1X: {(home_win + draw) * 100:.1f}%",
+                f"- X2: {(draw + away_win) * 100:.1f}%",
+                f"- 12: {(home_win + away_win) * 100:.1f}%",
+                "",
+            ]
+        )
+
+    if wants_all or "draw no bet" in request or "dnb" in request:
+        lines.extend(
+            [
+                "Draw no bet:",
+                f"- {home} win: {home_win * 100:.1f}%",
+                f"- Draw / refund: {draw * 100:.1f}%",
+                f"- {away} win: {away_win * 100:.1f}%",
+                "",
+            ]
+        )
+
+    if wants_all or "btts" in request or "both teams to score" in request:
+        lines.extend(
+            [
+                "Both teams to score:",
+                f"- Yes: {btts_yes * 100:.1f}%",
+                f"- No: {btts_no * 100:.1f}%",
+                "",
+            ]
+        )
+
+    if wants_all or "over" in request or "under" in request or "total" in request:
+        lines.append("Total goals:")
+        for line in (0.5, 1.5, 2.5, 3.5, 4.5):
+            over = over_probability(line)
+            lines.append(
+                f"- Over {line:.1f}: {over * 100:.1f}% | "
+                f"Under {line:.1f}: {(1.0 - over) * 100:.1f}%"
+            )
+        lines.append("")
+
+    if wants_all or "team total" in request:
+        lines.append("Team totals:")
+        for line in (0.5, 1.5, 2.5):
+            hp = home_over(line)
+            ap = away_over(line)
+            lines.append(
+                f"- {home} Over {line:.1f}: {hp * 100:.1f}% | "
+                f"{away} Over {line:.1f}: {ap * 100:.1f}%"
+            )
+        lines.append("")
+
+    if wants_all or "clean sheet" in request or "win to nil" in request:
+        lines.extend(
+            [
+                "Clean sheet / win to nil:",
+                f"- {home} clean sheet: {home_clean * 100:.1f}%",
+                f"- {away} clean sheet: {away_clean * 100:.1f}%",
+                f"- {home} win to nil: {home_win_nil * 100:.1f}%",
+                f"- {away} win to nil: {away_win_nil * 100:.1f}%",
+                "",
+            ]
+        )
+
+    if wants_all or "handicap" in request:
+        lines.append("Common Asian handicap lines:")
+        for side_name, side_key in ((home, "home"), (away, "away")):
+            for line in (-1.5, -1.0, -0.5, 0.5, 1.0, 1.5):
+                win, push, loss = _asian_handicap_probabilities(
+                    matrix,
+                    line,
+                    side=side_key,
+                )
+                push_text = f", push {push * 100:.1f}%" if push > 0.0001 else ""
+                lines.append(
+                    f"- {side_name} {line:+.1f}: win {win * 100:.1f}%"
+                    f"{push_text}, lose {loss * 100:.1f}%"
+                )
+        lines.append("")
+
+    if wants_all or "correct score" in request or "exact score" in request:
+        lines.append("Most likely exact scores:")
+        for index, (home_goals, away_goals, probability) in enumerate(top_scores, start=1):
+            lines.append(
+                f"{index}. {home} {home_goals}-{away_goals} {away} "
+                f"({probability * 100:.1f}%)"
+            )
+        lines.append("")
+
+    lines.append(
+        "These are model probability estimates, not guaranteed outcomes or betting advice."
+    )
+    return "\n".join(lines)
 
 
 def _remember_matchup(user_id: str, team1: str, team2: str) -> None:
