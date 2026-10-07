@@ -13,7 +13,7 @@ The assistant combines a large language model with tool calling, live sports API
 - Retrieve top scorers and injury updates
 - Search recent transfer/news information
 - Provide head-to-head and team-form summaries
-- Produce a transparent, form-based match outlook
+- Produce fixture-aware match predictions and Poisson correct-score projections
 - Answer football-rules questions from a local RAG knowledge base
 - Remember conversation context per WhatsApp user
 
@@ -78,11 +78,13 @@ WhatsApp User
 
 The match-outlook feature is intentionally described as an **estimate**, not a machine-learning betting model.
 
-The match predictor primarily uses current-season league performance from structured standings data, including points-per-game and goal-difference-per-game. When recent-match data is available, it blends that into the season signal with a smaller weight.
+The match predictor primarily uses current-season league performance from structured standings data. When recent-match data is available, it blends that into the season signal with a smaller weight.
 
-The first-listed team receives a small home-field adjustment. This lets the assistant still produce a prediction when the recent-results provider returns only one or two matches, without pretending that tiny sample is enough on its own.
+Before applying any home advantage, the assistant checks the actual upcoming fixture between the two clubs. If it finds the fixture, the real home team receives a small venue adjustment. If no upcoming head-to-head fixture is found, the model treats the matchup as neutral rather than assuming the first team typed is at home.
 
-The output includes estimated win/draw probabilities, a predicted outcome, and a confidence label. It remains an informational statistical estimate rather than a guaranteed result or betting model.
+For teams with usable scoring and conceding data, the assistant builds a simple Poisson score model. The same model supplies win/draw/loss probabilities and the most likely exact scorelines, keeping the outcome and correct-score projections internally consistent.
+
+The output includes estimated probabilities, a predicted outcome, a confidence label, and—when scoring data is available—a most likely scoreline. These are informational statistical estimates, not guaranteed results or betting advice.
 
 ## RAG knowledge base
 
@@ -210,7 +212,8 @@ This version includes:
 - persistent per-user conversation memory
 - stale-memory protection for current sports facts
 - MessageSid deduplication for repeated Twilio webhooks
-- evidence threshold before match probabilities are generated
+- fixture-aware home/away adjustment instead of assuming message order
+- Poisson-based win/draw/loss and correct-score projections
 
 ## Testing
 
@@ -249,4 +252,4 @@ This project demonstrates:
 
 ## Disclaimer
 
-Match outlooks are informational estimates based on recent form and are not guarantees, betting advice, or financial advice.
+Match predictions and score projections are informational statistical estimates and are not guarantees, betting advice, or financial advice.
