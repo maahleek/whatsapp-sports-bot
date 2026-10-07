@@ -1,4 +1,6 @@
 from bot import (
+    _asian_handicap_probabilities,
+    _betting_market_report,
     _extract_player_records,
     _normalize_team_name,
     _prediction_probabilities,
@@ -72,6 +74,42 @@ def test_matchup_context_for_followups():
     assert _last_matchup(user_id) == ("Arsenal", "Liverpool")
 
 
+def test_betting_market_report_from_score_matrix():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    report = _betting_market_report(context, "all")
+    assert "1X2 / Match result:" in report
+    assert "Both teams to score:" in report
+    assert "Total goals:" in report
+    assert "Common Asian handicap lines:" in report
+    assert "Most likely exact scores:" in report
+
+
+def test_asian_handicap_probabilities_sum_to_one():
+    projection = _score_projection(
+        (1.7, 1.1),
+        (1.4, 1.3),
+        first_is_home=True,
+    )
+    win, push, loss = _asian_handicap_probabilities(
+        projection["score_matrix"],
+        -1.0,
+        side="home",
+    )
+    assert abs((win + push + loss) - 1.0) < 1e-9
+
+
 if __name__ == "__main__":
     test_prediction_probabilities_sum_to_one()
     test_nested_player_search_shape()
@@ -79,4 +117,6 @@ if __name__ == "__main__":
     test_prediction_strength_can_use_season_with_small_recent_sample()
     test_poisson_score_projection_is_normalized()
     test_matchup_context_for_followups()
+    test_betting_market_report_from_score_matrix()
+    test_asian_handicap_probabilities_sum_to_one()
     print("API helper tests passed.")
