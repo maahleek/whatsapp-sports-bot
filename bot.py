@@ -36,6 +36,9 @@ _PROCESSED_MESSAGE_ORDER: deque[str] = deque()
 _PROCESSED_MESSAGE_LOCK = Lock()
 _MAX_PROCESSED_MESSAGE_SIDS = 1000
 
+_LAST_MATCHUPS: dict[str, tuple[str, str]] = {}
+_MATCHUP_CONTEXT_LOCK = Lock()
+
 LEAGUE_CODES = {
     "premier league": "PL",
     "english premier league": "PL",
@@ -298,6 +301,126 @@ def _prediction_strength(
 
     raise ValueError("No usable performance data was available for this team.")
 
+
+def _find_upcoming_fixture(team1: str, team2: str) -> dict[str, str] | None:
+    """Find an upcoming fixture between two teams and identify the real home side."""
+    first = _team_profile(team1)
+    second = _team_profile(team2)
+    data = _safe_get_json(
+        f"{SPORTSDB_BASE_URL}/eventsnext.php",
+        params={"id": first["id"]},
+    )
+    events = data.get("events") or []
+    first_name = _normalize_team_name(first["name"])
+    second_name = _normalize_team_name(second["name"])
+
+    for event in events:
+        home = str(event.get("strHomeTeam") or "")
+        away = str(event.get("strAwayTeam") or "")
+        home_norm = _normalize_team_name(home)
+        away_norm = _normalize_team_name(away)
+        if {home_norm, away_norm} != {first_name, second_name}:
+            continue
+        return {
+            "home": home,
+            "away": away,
+            "date": str(event.get("dateEvent") or ""),
+        }
+    return None
+
+
+def _scoring_rates(
+    season: dict[str, float | int | str] | None,
+    recent: dict[str, float | int | str] | None,
+) -> tuple[float, float] | None:
+    """Return blended goals-for and goals-against rates per match."""
+    if season is not None:
+        played = int(season["played"])
+        gf = float(season["goals_for"]) / played
+        ga = float(season["goals_against"]) / played
+        if recent is not None:
+            recent_played = int(recent["played"])
+            weight = min(0.30, 0.06 * recent_played)
+            gf = (1.0 - weight) * gf + weight * float(recent["goals_for_per_game"])
+            ga = (1.0 - weight) * ga + weight * float(recent["goals_against_per_game"])
+        return gf, ga
+
+    if recent is not None:
+        return (
+            float(recent["goals_for_per_game"]),
+            float(recent["goals_against_per_game"]),
+        )
+    return None
+
+
+def _poisson_probability(goals: int, rate: float) -> float:
+    return math.exp(-rate) * (rate ** goals) / math.factorial(goals)
+
+
+def _score_projection(
+    first_rates: tuple[float, float],
+    second_rates: tuple[float, float],
+    *,
+    first_is_home: bool | None,
+) -> dict[str, Any]:
+    """Create a simple Poisson score projection from scoring/conceding rates."""
+    first_for, first_against = first_rates
+    second_for, second_against = second_rates
+
+    first_rate = (first_for + second_against) / 2.0
+    second_rate = (second_for + first_against) / 2.0
+
+    if first_is_home is True:
+        first_rate *= 1.08
+        second_rate *= 0.94
+    elif first_is_home is False:
+        first_rate *= 0.94
+        second_rate *= 1.08
+
+    first_rate = min(4.0, max(0.20, first_rate))
+    second_rate = min(4.0, max(0.20, second_rate))
+
+    matrix: list[tuple[int, int, float]] = []
+    for first_goals in range(7):
+        for second_goals in range(7):
+            probability = (
+                _poisson_probability(first_goals, first_rate)
+                * _poisson_probability(second_goals, second_rate)
+            )
+            matrix.append((first_goals, second_goals, probability))
+
+    total = sum(item[2] for item in matrix) or 1.0
+    normalized = [
+        (first_goals, second_goals, probability / total)
+        for first_goals, second_goals, probability in matrix
+    ]
+    first_win = sum(p for a, b, p in normalized if a > b)
+    draw = sum(p for a, b, p in normalized if a == b)
+    second_win = sum(p for a, b, p in normalized if a < b)
+    top_scores = sorted(normalized, key=lambda item: item[2], reverse=True)[:3]
+
+    return {
+        "first_rate": first_rate,
+        "second_rate": second_rate,
+        "first_win": first_win,
+        "draw": draw,
+        "second_win": second_win,
+        "top_scores": top_scores,
+    }
+
+
+def _remember_matchup(user_id: str, team1: str, team2: str) -> None:
+    if not user_id:
+        return
+    with _MATCHUP_CONTEXT_LOCK:
+        _LAST_MATCHUPS[user_id] = (team1, team2)
+
+
+def _last_matchup(user_id: str) -> tuple[str, str] | None:
+    if not user_id:
+        return None
+    with _MATCHUP_CONTEXT_LOCK:
+        return _LAST_MATCHUPS.get(user_id)
 
 def _clean_web_snippet(value: Any, limit: int = 220) -> str:
     """Collapse noisy search-result text into a short plain-text snippet."""
