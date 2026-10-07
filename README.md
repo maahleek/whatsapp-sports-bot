@@ -29,6 +29,11 @@ Twilio WhatsApp
 FastAPI Webhook
      |
      v
+Safety / grounding router
+     |
+     +--> Direct deterministic tools for guarded intents
+     |
+     v
 LangGraph ReAct Agent
      |
      +--> Anthropic Claude
@@ -73,9 +78,9 @@ WhatsApp User
 
 The match-outlook feature is intentionally described as an **estimate**, not a machine-learning betting model.
 
-It compares each team's recent five-match form using points-per-game and goal-difference-per-game, then converts the relative strength difference into simple outcome probabilities.
+It uses up to five recent matches per team and requires at least three recent matches for both teams before calculating probabilities. The score uses points-per-game and goal-difference-per-game, then converts the relative strength difference into simple outcome probabilities.
 
-This makes the logic transparent and avoids presenting scraped predictions as a proprietary AI model.
+If there is not enough recent match history, the assistant refuses to produce percentages. This keeps the logic transparent and avoids presenting weak or scraped predictions as a proprietary AI model.
 
 ## RAG knowledge base
 
@@ -184,6 +189,7 @@ Optional:
 - `VERIFY_TWILIO_SIGNATURE`
 - `SPORTSDB_API_KEY`
 - `MEMORY_DB_PATH`
+- `MEMORY_NAMESPACE`
 - `HTTP_TIMEOUT_SECONDS`
 - `PORT`
 
@@ -200,13 +206,22 @@ This version includes:
 - runtime database files excluded from Git
 - explicit user-facing fallback messages
 - persistent per-user conversation memory
+- stale-memory protection for current sports facts
+- MessageSid deduplication for repeated Twilio webhooks
+- evidence threshold before match probabilities are generated
 
 ## Testing
 
-A deterministic prediction-probability test is included:
+API-helper and prediction-probability tests are included:
 
 ```bash
 python test_api.py
+```
+
+A WhatsApp response-formatting and current-turn grounding regression test is included:
+
+```bash
+python test_response_formatting.py
 ```
 
 A RAG smoke test is included:
