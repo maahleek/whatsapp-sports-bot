@@ -1106,6 +1106,7 @@ TOOLS = [
     get_top_scorers,
     get_player_injury,
     predict_match,
+    predict_correct_score,
     search_football_knowledge,
     get_league_fixtures,
     get_head_to_head,
@@ -1136,7 +1137,7 @@ Rules:
 2. Never expose function names, tool calls, XML, JSON, internal reasoning, or code to the user.
 3. Use the football knowledge-base tool for rules such as offside, VAR, cards, and penalties.
 4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
-5. Use the match-outlook tool when the user asks for a prediction. Clearly present it as an estimate, not a guaranteed result.
+5. Use the match prediction tool when the user asks who is likely to win, and use the correct-score projection tool when the user asks for an exact or correct score. Clearly present both as estimates, not guaranteed results.
 6. Keep WhatsApp responses concise, readable, and conversational.
 7. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
 8. Never invent, infer, reconstruct, or embellish statistics that were not returned by a tool in the current turn. Do not add xG, shot counts, possession, table positions, points, goals, or other metrics unless a current-turn tool explicitly returned them.
@@ -1219,20 +1220,33 @@ def _current_turn_tool_outputs(messages: list[Any]) -> list[str]:
     return outputs
 
 
-def _direct_guarded_tool_response(message: str) -> str | None:
-    """Route high-risk factual intents directly to deterministic tools."""
+def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
+    """Route guarded factual intents directly to deterministic tools."""
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.casefold()
-
-    if "correct score" in lowered or "exact score" in lowered:
-        return (
-            "I don't have enough verified data to predict an exact scoreline. "
-            "I can provide a form-based match outlook when enough recent matches are available."
-        )
 
     rule_keywords = ("offside", "var", "yellow card", "red card", "penalty rule", "penalty kick")
     if any(keyword in lowered for keyword in rule_keywords):
         return str(search_football_knowledge.invoke({"question": normalized}))
+
+    exact_score_match = re.search(
+        r"(?:correct|exact)\s+score(?:\s+(?:for|between))?\s+(.+?)\s+(?:vs\.?|versus|and)\s+(.+?)(?:[?.!]|$)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if exact_score_match:
+        team1 = exact_score_match.group(1).strip()
+        team2 = exact_score_match.group(2).strip()
+        _remember_matchup(user_id, team1, team2)
+        return str(predict_correct_score.invoke({"team1": team1, "team2": team2}))
+
+    if ("correct score" in lowered or "exact score" in lowered) and (
+        "them" in lowered or "between them" in lowered
+    ):
+        matchup = _last_matchup(user_id)
+        if matchup is not None:
+            team1, team2 = matchup
+            return str(predict_correct_score.invoke({"team1": team1, "team2": team2}))
 
     prediction_match = re.search(
         r"\bpredict\s+(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:[?.!]|$)",
@@ -1242,10 +1256,10 @@ def _direct_guarded_tool_response(message: str) -> str | None:
     if prediction_match:
         team1 = prediction_match.group(1).strip()
         team2 = prediction_match.group(2).strip()
+        _remember_matchup(user_id, team1, team2)
         return str(predict_match.invoke({"team1": team1, "team2": team2}))
 
     return None
-
 
 def _requires_current_tool_data(message: str) -> bool:
     """Detect requests that should never be answered from stale conversation memory."""
@@ -1260,7 +1274,7 @@ def _requires_current_tool_data(message: str) -> bool:
 
 
 def ask_agent(message: str, user_id: str) -> str:
-    direct_response = _direct_guarded_tool_response(message)
+    direct_response = _direct_guarded_tool_response(message, user_id)
     if direct_response is not None:
         return sanitize_whatsapp_response(direct_response)
 
