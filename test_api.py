@@ -1,4 +1,9 @@
-from bot import _extract_player_records, _prediction_probabilities
+from bot import (
+    _extract_player_records,
+    _normalize_team_name,
+    _prediction_probabilities,
+    _prediction_strength,
+)
 
 
 def test_prediction_probabilities_sum_to_one():
@@ -22,7 +27,29 @@ def test_nested_player_search_shape():
     assert players[0]["name"] == "Erling Haaland"
 
 
+def test_team_name_normalization():
+    assert _normalize_team_name("Arsenal FC") == "arsenal"
+    assert _normalize_team_name("Liverpool F.C.") == "liverpool"
+
+
+def test_prediction_strength_can_use_season_with_small_recent_sample():
+    season = {
+        "points_per_game": 2.4,
+        "goal_diff_per_game": 0.8,
+    }
+    recent = {
+        "played": 1,
+        "points_per_game": 3.0,
+        "goal_diff_per_game": 1.0,
+    }
+    strength, source = _prediction_strength(season, recent)
+    assert strength > 0
+    assert source == "season + recent form"
+
+
 if __name__ == "__main__":
     test_prediction_probabilities_sum_to_one()
     test_nested_player_search_shape()
+    test_team_name_normalization()
+    test_prediction_strength_can_use_season_with_small_recent_sample()
     print("API helper tests passed.")
