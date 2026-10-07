@@ -14,6 +14,8 @@ The assistant combines a large language model with tool calling, live sports API
 - Search recent transfer/news information
 - Provide head-to-head and team-form summaries
 - Produce fixture-aware match predictions and Poisson correct-score projections
+- Explain a broad football-betting glossary through RAG
+- Estimate common betting-market probabilities such as 1X2, double chance, DNB, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score
 - Answer football-rules questions from a local RAG knowledge base
 - Remember conversation context per WhatsApp user
 
@@ -86,9 +88,32 @@ For teams with usable scoring and conceding data, the assistant builds a simple 
 
 The output includes estimated probabilities, a predicted outcome, a confidence label, and—when scoring data is available—a most likely scoreline. These are informational statistical estimates, not guaranteed results or betting advice.
 
+## Betting terminology and market analytics
+
+Betting terminology is stored in `betting_knowledge.txt` and indexed in the same local Chroma knowledge base as the football-rules content.
+
+The glossary covers common football markets and settlement language, including 1X2, moneyline, double chance, draw no bet, BTTS, over/under, Asian totals, Asian handicap, European handicap, correct score, team totals, clean sheets, win to nil, half-time/full-time, player props, corners, cards, accumulators, implied probability, push/void, cash out, and other common terms.
+
+For matchups with usable scoring data, the Poisson score distribution is also converted into market probabilities for:
+
+- 1X2
+- double chance
+- draw no bet
+- BTTS
+- total goals from 0.5 to 4.5
+- team totals
+- clean sheet
+- win to nil
+- common Asian handicap lines from -1.5 to +1.5
+- most likely exact scores
+
+Markets such as corners, cards, player shots, player cards, goalscorer props, and other event-level props are explained by the knowledge base but are not predicted from goal data alone. They require dedicated historical data sources before the assistant can model them responsibly.
+
+The assistant does not provide guaranteed-win claims or stake-size recommendations. Market outputs are probability estimates only.
+
 ## RAG knowledge base
 
-Football rules are stored in `football_knowledge.txt`.
+Football rules are stored in `football_knowledge.txt`, while betting terminology is stored in `betting_knowledge.txt`.
 
 The project:
 
@@ -214,6 +239,8 @@ This version includes:
 - MessageSid deduplication for repeated Twilio webhooks
 - fixture-aware home/away adjustment instead of assuming message order
 - Poisson-based win/draw/loss and correct-score projections
+- betting-market probability calculations derived from the same score distribution
+- RAG-based betting terminology explanations
 
 ## Testing
 
@@ -252,4 +279,4 @@ This project demonstrates:
 
 ## Disclaimer
 
-Match predictions and score projections are informational statistical estimates and are not guarantees, betting advice, or financial advice.
+Match predictions, score projections, and betting-market probabilities are informational statistical estimates. They are not guarantees, stake recommendations, or financial advice.
