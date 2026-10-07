@@ -1,0 +1,127 @@
+FOOTBALL BETTING TERMS AND MARKETS
+
+1X2 / Match Result:
+A three-way football market. 1 means the home team wins, X means a draw, and 2 means the away team wins after normal regulation time.
+
+Moneyline:
+A general term for choosing the outright winner. In football, a standard three-way moneyline usually includes home win, draw, and away win unless the market explicitly removes the draw.
+
+Double Chance:
+Combines two of the three 1X2 outcomes. 1X covers home win or draw. X2 covers draw or away win. 12 covers either team to win and loses only if the match is drawn.
+
+Draw No Bet (DNB):
+The selected team must win for the bet to win. If the match ends in a draw, the stake is normally returned. A loss by the selected team loses the bet.
+
+Both Teams To Score (BTTS):
+BTTS Yes wins if both teams score at least one goal in normal time. BTTS No wins if at least one team fails to score.
+
+Over / Under Goals:
+A totals market based on the combined goals scored by both teams. Over 2.5 means at least 3 total goals. Under 2.5 means 0, 1, or 2 total goals. Half-goal lines such as 1.5, 2.5, and 3.5 cannot push.
+
+Whole-Goal Totals:
+Lines such as Over 2.0 or Under 3.0 can push. For example, Over 2.0 is refunded if exactly 2 goals are scored, wins with 3 or more, and loses with 0 or 1.
+
+Asian Total:
+A goals-total market that can use whole, half, or quarter lines. Quarter lines split the stake across the two nearest half/whole lines. For example, Over 2.25 is half Over 2.0 and half Over 2.5.
+
+Asian Handicap:
+A handicap market designed to reduce or remove the draw. A team on -0.5 must win. A team on +0.5 wins the market if it wins or draws. Whole lines such as -1.0 can push. Quarter lines such as -0.25, -0.75, +0.25, and +0.75 split the stake across adjacent handicap lines and can produce half-win or half-loss outcomes.
+
+European Handicap:
+A three-way handicap market that still includes a handicap draw. The handicap is applied before grading the home win, draw, or away win outcome.
+
+Correct Score:
+A market predicting the exact final score after normal regulation time, such as 1-0, 1-1, or 2-1.
+
+Team Total Goals:
+A totals market for one team only. For example, Arsenal Over 1.5 team goals requires Arsenal to score at least 2 goals.
+
+Clean Sheet:
+A team keeps a clean sheet if it concedes zero goals. Clean Sheet Yes means the selected team does not concede.
+
+Win To Nil:
+The selected team must win while conceding zero goals. A 1-0 or 2-0 win qualifies; a 2-1 win does not.
+
+Half-Time Result:
+A 1X2 market settled using only the score at half-time.
+
+Half-Time / Full-Time:
+Combines the half-time result and full-time result, such as Draw/Home or Home/Home.
+
+First Team To Score:
+The market is settled by which team scores the first goal. Some sportsbooks include a No Goal option.
+
+Last Team To Score:
+The market is settled by which team scores the final goal. Some sportsbooks include a No Goal option.
+
+Exact Goals / Total Goals Bands:
+A market on the exact number of total goals or a range, such as exactly 2 goals or 2-3 total goals.
+
+Odd / Even Goals:
+Settled by whether the total number of match goals is odd or even. Zero is normally treated as even.
+
+Winning Margin:
+Predicts the size of the winning margin, for example home team by exactly 1 goal, by 2 goals, or by 3+ goals.
+
+Result + BTTS:
+Combines match result and both-teams-to-score, such as Home Win & BTTS Yes.
+
+Result + Total Goals:
+Combines match result and a goals line, such as Home Win & Over 2.5.
+
+Double Chance + Total Goals:
+Combines a double-chance selection with a goals total, such as 1X & Over 1.5.
+
+To Qualify:
+Used in knockout competitions. The selected team must progress to the next round, regardless of whether qualification happens in normal time, extra time, or penalties according to the sportsbook's market rules.
+
+Extra Time:
+The additional 30 minutes played in some knockout matches after a draw in regulation time. Standard 90-minute markets normally exclude extra time unless clearly stated.
+
+Penalty Shootout:
+A tie-breaking shootout after extra time in some knockout matches. Standard match-result markets usually exclude shootouts unless the market is specifically 'to qualify' or 'winner including penalties'.
+
+Push / Void:
+A push means the market lands exactly on a whole-number line and the stake is normally returned. A void bet is cancelled and the stake is normally returned.
+
+Half Win / Half Loss:
+Common with Asian quarter lines. A quarter-line stake is split across two adjacent lines, so one half can win or lose while the other half pushes.
+
+Favourite / Underdog:
+The favourite is the outcome priced as more likely by the market. The underdog is priced as less likely.
+
+Odds:
+The price attached to an outcome. Decimal odds show total return per unit staked, including the stake. For example, decimal odds of 2.00 return 2 units for every 1 unit staked if the bet wins.
+
+Implied Probability:
+A simple probability estimate derived from decimal odds: implied probability = 1 / decimal odds. Bookmaker margins mean the implied probabilities of all outcomes can add to more than 100%.
+
+Accumulator / Parlay:
+A single bet containing multiple selections. Every leg normally has to win for the accumulator to win, unless the product has special rules.
+
+Same Game Parlay / Bet Builder:
+Combines multiple selections from the same match into one bet. Correlated selections may be restricted or priced differently by the sportsbook.
+
+Live / In-Play Betting:
+Markets offered after the match has started. Prices and available markets change with game events.
+
+Pre-Match Betting:
+Markets offered before kickoff.
+
+Cash Out:
+A sportsbook feature that may allow a bet to be settled before the event ends for an offered amount. The amount can be higher or lower than the original stake.
+
+Stake, Return, Profit:
+Stake is the amount risked. Return is the total amount paid back on a winning bet, usually including the original stake. Profit is return minus stake.
+
+Market and Line:
+A market is the type of bet, such as match result or total goals. The line is the threshold or handicap, such as Over 2.5 or Arsenal -0.5.
+
+Home / Away:
+Home refers to the team listed as the host; away refers to the visiting team. Handicap and 1X2 labels depend on the actual fixture order, not the order in which a user types the team names.
+
+Model Probability:
+A statistical estimate produced by a model. It is not a guarantee. A model should clearly state which data it uses and should not present a prediction as certain.
+
+Responsible Use:
+Betting markets involve uncertainty and financial risk. Statistical predictions can be wrong even when they use current data. The assistant should explain terms and probability estimates clearly but should not promise guaranteed wins, recommend stake sizes, or claim a market is risk-free.
