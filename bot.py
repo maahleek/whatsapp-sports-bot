@@ -899,76 +899,20 @@ def get_player_injury(player_name: str) -> str:
 
 @tool
 def predict_match(team1: str, team2: str) -> str:
-    """Estimate a football match outcome using season performance plus available recent form."""
+    """Predict a match using season performance, recent form, venue, and a Poisson scoring model."""
     try:
-        first_season = None
-        second_season = None
-        first_recent = None
-        second_recent = None
-
-        try:
-            first_season = _season_team_summary(team1)
-        except Exception:
-            pass
-        try:
-            second_season = _season_team_summary(team2)
-        except Exception:
-            pass
-        try:
-            first_recent = _form_summary(team1)
-        except Exception:
-            pass
-        try:
-            second_recent = _form_summary(team2)
-        except Exception:
-            pass
-
-        first_strength, first_source = _prediction_strength(
-            first_season,
-            first_recent,
-        )
-        second_strength, second_source = _prediction_strength(
-            second_season,
-            second_recent,
-        )
-
-        # Treat the first-listed team as the home side and apply a small,
-        # transparent home-field adjustment.
-        home_advantage = 0.12
-        first_strength += home_advantage
-
-        first_prob, draw_prob, second_prob = _prediction_probabilities(
-            first_strength,
-            second_strength,
-        )
-
-        first_name = str(
-            (first_season or first_recent or {"team": team1})["team"]
-        )
-        second_name = str(
-            (second_season or second_recent or {"team": team2})["team"]
-        )
-
-        outcomes = {
-            first_name: first_prob,
-            "Draw": draw_prob,
-            second_name: second_prob,
-        }
-        likely_outcome = max(outcomes, key=outcomes.get)
-        margin = sorted(outcomes.values(), reverse=True)
-        gap = margin[0] - margin[1]
-        confidence = "medium" if gap >= 0.10 else "low"
+        context = _build_prediction_context(team1, team2)
+        first_name = context["first_name"]
+        second_name = context["second_name"]
 
         evidence_lines = []
         for name, season, recent, source in (
-            (first_name, first_season, first_recent, first_source),
-            (second_name, second_season, second_recent, second_source),
+            (first_name, context["first_season"], context["first_recent"], context["first_source"]),
+            (second_name, context["second_season"], context["second_recent"], context["second_source"]),
         ):
             details = []
             if season is not None:
-                details.append(
-                    f"{season['points']} pts from {season['played']} league matches"
-                )
+                details.append(f"{season['points']} pts from {season['played']} league matches")
                 details.append(f"position {season['position']}")
             if recent is not None:
                 details.append(
@@ -976,25 +920,73 @@ def predict_match(team1: str, team2: str) -> str:
                     f"{recent['losses']}L from {recent['played']} "
                     f"{'match' if int(recent['played']) == 1 else 'matches'}"
                 )
-            evidence_lines.append(
-                f"- {name}: {source}; " + "; ".join(details)
+            evidence_lines.append(f"- {name}: {source}; " + "; ".join(details))
+
+        score_line = ""
+        projection = context["projection"]
+        if projection is not None:
+            best = projection["top_scores"][0]
+            score_line = (
+                f"\nMost likely scoreline: {first_name} {best[0]}-{best[1]} {second_name} "
+                f"({best[2] * 100:.1f}% as a single exact score)\n"
             )
 
         return (
             f"Match prediction: {first_name} vs {second_name}\n\n"
+            f"{context['venue_note']}\n\n"
             "Data used:\n"
             + "\n".join(evidence_lines)
-            + "\n\nEstimated probabilities:\n"
-            f"- {first_name}: {first_prob * 100:.1f}%\n"
-            f"- Draw: {draw_prob * 100:.1f}%\n"
-            f"- {second_name}: {second_prob * 100:.1f}%\n\n"
-            f"Prediction: {likely_outcome}\n"
-            f"Confidence: {confidence}\n\n"
-            "The first-listed team receives a small home-field adjustment. "
-            "This is a statistical estimate, not a guaranteed result or betting advice."
+            + f"\n\nModel: {context['probability_source']}\n"
+            + "\nEstimated probabilities:\n"
+            f"- {first_name}: {context['first_probability'] * 100:.1f}%\n"
+            f"- Draw: {context['draw_probability'] * 100:.1f}%\n"
+            f"- {second_name}: {context['second_probability'] * 100:.1f}%\n\n"
+            f"Prediction: {context['likely_outcome']}\n"
+            f"Confidence: {context['confidence']}"
+            + score_line
+            + "\nThis is a statistical estimate, not a guaranteed result or betting advice."
         )
     except Exception as exc:
         return f"I couldn't generate a match prediction right now: {exc}"
+
+
+@tool
+def predict_correct_score(team1: str, team2: str) -> str:
+    """Project the most likely exact scorelines using a simple Poisson scoring model."""
+    try:
+        context = _build_prediction_context(team1, team2)
+        projection = context["projection"]
+        first_name = context["first_name"]
+        second_name = context["second_name"]
+        if projection is None:
+            return (
+                f"I can predict the match outcome for {first_name} vs {second_name}, "
+                "but I do not have enough scoring data for an exact-score projection."
+            )
+
+        lines = [
+            f"Correct-score projection: {first_name} vs {second_name}",
+            context["venue_note"],
+            "",
+            "Most likely scorelines:",
+        ]
+        for index, (first_goals, second_goals, probability) in enumerate(
+            projection["top_scores"],
+            start=1,
+        ):
+            lines.append(
+                f"{index}. {first_name} {first_goals}-{second_goals} {second_name} "
+                f"({probability * 100:.1f}%)"
+            )
+        lines.extend(
+            [
+                "",
+                "These are model estimates from current scoring/conceding rates, not guaranteed scores.",
+            ]
+        )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"I couldn't generate a correct-score projection right now: {exc}"
 
 
 @tool
