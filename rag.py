@@ -1,3 +1,4 @@
+import re
 import shutil
 from functools import lru_cache
 from pathlib import Path
@@ -92,3 +93,80 @@ def search_knowledge(
 
     results = get_vectorstore().similarity_search(question, **kwargs)
     return [document.page_content for document in results]
+
+def lookup_betting_term(question: str) -> str | None:
+    """Prefer exact glossary sections before falling back to semantic retrieval."""
+    path = KNOWLEDGE_FILES["betting_terms"]
+    if not path.exists():
+        return None
+
+    text = path.read_text(encoding="utf-8").strip()
+    sections = [
+        section.strip()
+        for section in text.split("\n\n")
+        if section.strip()
+        and section.strip() != "FOOTBALL BETTING TERMS AND MARKETS"
+    ]
+
+    normalized_question = " ".join(
+        re.sub(r"[^a-z0-9+\-./ ]+", " ", question.casefold()).split()
+    )
+
+    aliases = {
+        "1x2 / match result": ("1x2", "match result"),
+        "moneyline": ("moneyline",),
+        "double chance": ("double chance", "1x", "x2"),
+        "draw no bet (dnb)": ("draw no bet", "dnb"),
+        "both teams to score (btts)": ("both teams to score", "btts"),
+        "over / under goals": ("over ", "under ", "over/under"),
+        "asian total": ("asian total",),
+        "asian handicap": ("asian handicap",),
+        "european handicap": ("european handicap",),
+        "correct score": ("correct score", "exact score"),
+        "team total goals": ("team total",),
+        "clean sheet": ("clean sheet",),
+        "win to nil": ("win to nil",),
+        "half-time result": ("half-time result", "half time result"),
+        "half-time / full-time": ("half-time/full-time", "half time full time"),
+        "accumulator / parlay": ("accumulator", "parlay"),
+        "same game parlay / bet builder": ("bet builder", "same game parlay"),
+        "push / void": ("push", "void"),
+        "half win / half loss": ("half win", "half loss"),
+        "odds": ("odds",),
+        "implied probability": ("implied probability",),
+        "cash out": ("cash out",),
+        "stake, return, profit": ("stake", "return", "profit"),
+        "corners markets": ("corner", "corners"),
+        "cards / booking markets": ("card", "cards", "booking"),
+        "anytime goalscorer": ("anytime goalscorer", "goalscorer"),
+        "player shots / shots on target": ("shots on target", "player shots"),
+        "player assists": ("player assists", "assist"),
+        "first-half goals": ("first half goals", "first-half goals"),
+        "second-half goals": ("second half goals", "second-half goals"),
+        "winning either half": ("winning either half",),
+        "win both halves": ("win both halves",),
+        "top goalscorer": ("top goalscorer",),
+        "to qualify": ("to qualify",),
+        "extra time": ("extra time",),
+        "penalty shootout": ("penalty shootout", "penalties"),
+    }
+
+    by_title = {}
+    for section in sections:
+        title = section.split(":", 1)[0].strip().casefold()
+        by_title[title] = section
+
+    matches: list[tuple[int, str]] = []
+    for title, terms in aliases.items():
+        for term in terms:
+            if term in normalized_question:
+                matches.append((len(term), title))
+                break
+
+    if matches:
+        matches.sort(reverse=True)
+        best_title = matches[0][1]
+        if best_title in by_title:
+            return by_title[best_title]
+
+    return None
