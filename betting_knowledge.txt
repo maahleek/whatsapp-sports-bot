@@ -125,3 +125,112 @@ A statistical estimate produced by a model. It is not a guarantee. A model shoul
 
 Responsible Use:
 Betting markets involve uncertainty and financial risk. Statistical predictions can be wrong even when they use current data. The assistant should explain terms and probability estimates clearly but should not promise guaranteed wins, recommend stake sizes, or claim a market is risk-free.
+
+
+Corners Markets:
+Corner markets are based on the number of corners, such as Over 9.5 total corners, team corners, corner handicap, first team to a number of corners, or most corners. Reliable corner prediction requires corner-specific historical data; goal data alone is not enough.
+
+Cards / Booking Markets:
+Card markets can cover total cards, team cards, player cards, or booking points. Settlement rules differ by sportsbook, especially for second yellow cards and red cards. Reliable card prediction requires disciplinary data.
+
+Anytime Goalscorer:
+The selected player must score at any point during the eligible match period. Own goals normally do not count for the credited player.
+
+First Goalscorer / Last Goalscorer:
+Predicts the player who scores the first or last eligible goal. Sportsbooks may have special rules for substitutes, own goals, and players who do not participate.
+
+Player Shots / Shots on Target:
+Player-prop markets based on recorded shots or shots on target. Definitions can vary by data provider, so official settlement rules matter.
+
+Player Assists:
+A player-prop market on whether or how many assists a player records. Assist definitions can differ across data providers.
+
+First-Half Goals:
+Totals or team totals settled using only first-half goals, such as First Half Over 0.5 or First Half Over 1.5.
+
+Second-Half Goals:
+Totals or team totals settled using only goals scored after half-time within regulation time.
+
+Team To Score In Both Halves:
+The selected team must score at least once in the first half and at least once in the second half.
+
+Both Teams To Score In Both Halves:
+Both teams must each score in both halves. This is much stricter than standard BTTS.
+
+Race To Goals:
+Predicts which team reaches a specified goal count first, such as Race to 2 Goals. A No Team option may be available.
+
+Goal Before Minute / Time Of First Goal:
+A time-based market predicting whether a goal occurs before or after a specified minute, or the interval in which the first goal is scored.
+
+Highest Scoring Half:
+Predicts whether the first half, second half, or both halves equally contain more goals.
+
+Home Team / Away Team Over-Under:
+A team-total market applied only to the home or away side, such as Home Team Over 1.5 Goals.
+
+Both Teams 1+ / 2+ Goals:
+Requires both teams to reach a stated goal threshold. For example, both teams 2+ goals requires at least two goals from each team.
+
+Winning Either Half:
+The selected team must win at least one of the two halves. The full-time result does not have to be a win.
+
+Win Both Halves:
+The selected team must outscore the opponent in each half separately.
+
+Most Goals:
+A comparative market asking which team scores more goals, sometimes offered across matches or halves.
+
+Corner Handicap:
+A handicap applied to corner counts rather than goals. It uses the same general handicap idea but is settled on corners.
+
+Card Handicap:
+A handicap applied to card or booking-point totals rather than goals.
+
+Player To Be Carded:
+A player-prop market that wins if the selected player receives a qualifying card under the sportsbook's rules.
+
+To Score Or Assist:
+A player-prop market that wins if the selected player records either a qualifying goal or assist.
+
+No Bet / Action:
+A market can be declared no action or void when settlement conditions are not met, such as an abandoned event under certain rules. The stake is normally returned.
+
+Dead Heat:
+When multiple selections tie for a finishing position in markets where only some places are paid. Sportsbooks may divide the stake or payout according to dead-heat rules.
+
+Enhanced Odds / Boost:
+A promotional price higher than the standard odds. The underlying event risk does not change just because the offered odds are boosted.
+
+Each Way:
+Common in racing and some outright markets. The stake is split between a win bet and a place bet. Place terms determine how many finishing positions qualify and at what fraction of the win odds.
+
+Outright / Futures:
+A long-term market on the winner or finishing position of a competition, such as league champion, top-four finish, or tournament winner.
+
+Relegation / Promotion:
+Season-long markets on whether a team will be relegated or promoted.
+
+Top Four / Top Six / Top Half:
+Season finishing-position markets. Settlement is based on the competition's official final table and sportsbook rules.
+
+Top Goalscorer:
+An outright market on which player finishes a competition as the leading goalscorer. Dead-heat rules may apply if players finish level, depending on the sportsbook.
+
+Qualification Market:
+A market on whether a team qualifies for a tournament stage, competition, or next round.
+
+Both Teams To Receive A Card:
+A card market requiring each team to receive at least one qualifying card.
+
+Penalty Awarded:
+Predicts whether a penalty kick will be awarded during the eligible match period.
+
+Red Card:
+Predicts whether a qualifying red card will be shown. Settlement rules can differ for second-yellow dismissals.
+
+Own Goal:
+Predicts whether an own goal will occur.
+
+VAR Market:
+Some sportsbooks offer markets related to VAR reviews or overturned decisions. Definitions and settlement rules are highly sportsbook-specific.
