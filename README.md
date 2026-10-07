@@ -78,9 +78,11 @@ WhatsApp User
 
 The match-outlook feature is intentionally described as an **estimate**, not a machine-learning betting model.
 
-It uses up to five recent matches per team and requires at least three recent matches for both teams before calculating probabilities. The score uses points-per-game and goal-difference-per-game, then converts the relative strength difference into simple outcome probabilities.
+The match predictor primarily uses current-season league performance from structured standings data, including points-per-game and goal-difference-per-game. When recent-match data is available, it blends that into the season signal with a smaller weight.
 
-If there is not enough recent match history, the assistant refuses to produce percentages. This keeps the logic transparent and avoids presenting weak or scraped predictions as a proprietary AI model.
+The first-listed team receives a small home-field adjustment. This lets the assistant still produce a prediction when the recent-results provider returns only one or two matches, without pretending that tiny sample is enough on its own.
+
+The output includes estimated win/draw probabilities, a predicted outcome, and a confidence label. It remains an informational statistical estimate rather than a guaranteed result or betting model.
 
 ## RAG knowledge base
 
