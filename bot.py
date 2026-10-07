@@ -970,7 +970,7 @@ def predict_match(team1: str, team2: str) -> str:
                 score_label = f"{first_name} {best[0]}-{best[1]} {second_name}"
 
             score_line = (
-                f"\nMost likely scoreline: {score_label} "
+                f"\nMost likely exact scoreline: {score_label} "
                 f"({best[2] * 100:.1f}% as a single exact score)\n"
             )
 
@@ -984,7 +984,7 @@ def predict_match(team1: str, team2: str) -> str:
             f"- {first_name}: {context['first_probability'] * 100:.1f}%\n"
             f"- Draw: {context['draw_probability'] * 100:.1f}%\n"
             f"- {second_name}: {context['second_probability'] * 100:.1f}%\n\n"
-            f"Prediction: {context['likely_outcome']}\n"
+            f"Overall outcome edge: {context['likely_outcome']}\n"
             f"Confidence: {context['confidence']}"
             + score_line
             + "\nThis is a statistical estimate, not a guaranteed result or betting advice."
