@@ -105,6 +105,7 @@ def _team_record(team_name: str) -> tuple[str, str]:
     return profile["id"], profile["name"]
 
 
+@lru_cache(maxsize=1024)
 def _recent_events(team_name: str, limit: int = 5) -> tuple[str, list[dict[str, Any]]]:
     team_id, canonical_name = _team_record(team_name)
     data = _safe_get_json(
@@ -220,18 +221,24 @@ def _team_profile(team_name: str) -> dict[str, str]:
     }
 
 
+@lru_cache(maxsize=16)
+def _competition_standings(code: str) -> list[dict[str, Any]]:
+    """Fetch and cache a competition table so batch analysis does not repeat the same request."""
+    data = _safe_get_json(
+        f"{FOOTBALL_DATA_BASE_URL}/competitions/{code}/standings",
+        headers=_football_data_headers(),
+    )
+    standings = data.get("standings") or []
+    return standings[0].get("table", []) if standings else []
+
+
 def _season_team_summary(team_name: str) -> dict[str, float | int | str] | None:
     profile = _team_profile(team_name)
     code = _league_code(profile["league"])
     if not code:
         return None
 
-    data = _safe_get_json(
-        f"{FOOTBALL_DATA_BASE_URL}/competitions/{code}/standings",
-        headers=_football_data_headers(),
-    )
-    standings = data.get("standings") or []
-    table = standings[0].get("table", []) if standings else []
+    table = _competition_standings(code)
     target = _normalize_team_name(profile["name"])
 
     for item in table:
@@ -863,6 +870,7 @@ def _build_prediction_context(
     *,
     known_fixture: dict[str, str] | None = None,
     recent_only: bool = False,
+    prefer_season_only: bool = False,
 ) -> dict[str, Any]:
     """Gather performance data, fixture venue, and score projection."""
     first_season = second_season = None
@@ -877,14 +885,16 @@ def _build_prediction_context(
             second_season = _season_team_summary(team2)
         except Exception:
             pass
-    try:
-        first_recent = _form_summary(team1)
-    except Exception:
-        pass
-    try:
-        second_recent = _form_summary(team2)
-    except Exception:
-        pass
+    if not (prefer_season_only and first_season is not None):
+        try:
+            first_recent = _form_summary(team1)
+        except Exception:
+            pass
+    if not (prefer_season_only and second_season is not None):
+        try:
+            second_recent = _form_summary(team2)
+        except Exception:
+            pass
 
     first_strength, first_source = _prediction_strength(first_season, first_recent)
     second_strength, second_source = _prediction_strength(second_season, second_recent)
@@ -1822,6 +1832,20 @@ def _sportybet_selection_model_support(
 
     return None, str(selection.get("market_name") or "Unsupported market")
 
+def _sportybet_context_has_enough_data(context: dict[str, Any]) -> bool:
+    """Avoid confident booking-slip probabilities from tiny recent-form samples."""
+    for season_key, recent_key in (
+        ("first_season", "first_recent"),
+        ("second_season", "second_recent"),
+    ):
+        if context.get(season_key) is not None:
+            continue
+        recent = context.get(recent_key)
+        if recent is None or int(recent.get("played") or 0) < 3:
+            return False
+    return True
+
+
 def _model_alignment(probability: float) -> str:
     if probability >= 0.65:
         return "higher model support"
@@ -1864,16 +1888,20 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
 
             try:
                 # SportyBet already tells us the real home/away order, so avoid
-                # extra fixture-discovery requests. Recent-only mode keeps a
-                # large booking-code analysis responsive and avoids dozens of
-                # standings requests.
+                # fixture-discovery calls. For major supported leagues, cached
+                # season standings are used without an extra recent-form call;
+                # other leagues fall back to recent form.
                 context = _build_prediction_context(
                     home,
                     away,
                     known_fixture={"home": home, "away": away, "date": ""},
-                    recent_only=True,
+                    recent_only=False,
+                    prefer_season_only=True,
                 )
-                if context.get("projection") is None:
+                if (
+                    context.get("projection") is None
+                    or not _sportybet_context_has_enough_data(context)
+                ):
                     return {"probability": None, "label": market_name}
 
                 probability, label = _sportybet_selection_model_support(
@@ -1886,7 +1914,7 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
 
         # Network-bound team lookups are independent. A small worker pool
         # dramatically reduces large-slip latency without flooding providers.
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=8) as executor:
             evaluations = list(executor.map(evaluate_selection, selections))
 
         for index, selection in enumerate(selections, start=1):
@@ -1932,7 +1960,7 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
                 f"- Lower support: {counts['lower']}",
                 f"- Not modelled: {counts['unmodelled']}",
                 "",
-                "Large slips use a fast recent-form scoring comparison and SportyBet's known home/away order; regular single-match predictions still use the fuller season + recent-form model.",
+                "Large slips use cached season data when available and recent-form fallback elsewhere. Comparisons are withheld when the available sample is too small.",
                 "This is an experimental read-only lookup of SportyBet's undocumented website endpoint. It does not place or submit a wager.",
                 "Model probabilities are estimates, not guaranteed outcomes or betting advice.",
             ]
