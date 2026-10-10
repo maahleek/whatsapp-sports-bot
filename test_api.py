@@ -14,6 +14,9 @@ from bot import (
     _sportybet_platform_probability,
     _format_sportybet_analysis_summary,
     _format_sportybet_cached_view,
+    _parse_sportybet_booking_request,
+    _resolve_sportybet_fixture,
+    _resolve_sportybet_pick,
     _total_line_settlement,
     _remember_matchup,
     _last_matchup,
@@ -455,6 +458,105 @@ def test_sportybet_cached_views_filter_without_reanalysis():
     assert "Loaded from the cached analysis" in unmodelled
 
 
+def _sample_sportybet_fixture_for_creation():
+    return {
+        "event_id": "sr:match:123",
+        "home_team": "Arsenal",
+        "away_team": "Chelsea",
+        "league": "Premier League",
+        "category": "England",
+        "start_ms": 9999999999999,
+        "match_status": "Not start",
+        "markets": [
+            {
+                "market_id": "1",
+                "market_name": "1X2",
+                "specifier": None,
+                "status": 0,
+                "outcomes": [
+                    {"outcome_id": "1", "outcome_name": "Home", "odds": 1.80, "is_active": True},
+                    {"outcome_id": "2", "outcome_name": "Draw", "odds": 3.50, "is_active": True},
+                    {"outcome_id": "3", "outcome_name": "Away", "odds": 4.20, "is_active": True},
+                ],
+            },
+            {
+                "market_id": "18",
+                "market_name": "Over/Under",
+                "specifier": "total=2.5",
+                "status": 0,
+                "outcomes": [
+                    {"outcome_id": "12", "outcome_name": "Over", "odds": 1.70, "is_active": True},
+                    {"outcome_id": "13", "outcome_name": "Under", "odds": 2.05, "is_active": True},
+                ],
+            },
+            {
+                "market_id": "10",
+                "market_name": "Double Chance",
+                "specifier": None,
+                "status": 0,
+                "outcomes": [
+                    {"outcome_id": "4", "outcome_name": "Home or Draw", "odds": 1.20, "is_active": True},
+                    {"outcome_id": "5", "outcome_name": "Draw or Away", "odds": 1.80, "is_active": True},
+                    {"outcome_id": "6", "outcome_name": "Home or Away", "odds": 1.25, "is_active": True},
+                ],
+            },
+            {
+                "market_id": "29",
+                "market_name": "GG/NG",
+                "specifier": None,
+                "status": 0,
+                "outcomes": [
+                    {"outcome_id": "74", "outcome_name": "GG", "odds": 1.75, "is_active": True},
+                    {"outcome_id": "76", "outcome_name": "NG", "odds": 1.95, "is_active": True},
+                ],
+            },
+        ],
+    }
+
+
+def test_parse_sportybet_booking_creation_request():
+    parsed = _parse_sportybet_booking_request(
+        "Create SportyBet code:\n"
+        "Arsenal vs Chelsea | Over 2.5\n"
+        "Liverpool vs Everton | Home"
+    )
+    assert len(parsed) == 2
+    assert parsed[0]["team1"] == "Arsenal"
+    assert parsed[0]["pick"] == "Over 2.5"
+
+
+def test_resolve_sportybet_fixture_for_creation():
+    fixture = _sample_sportybet_fixture_for_creation()
+    resolved = _resolve_sportybet_fixture(
+        [fixture],
+        "Arsenal FC",
+        "Chelsea",
+    )
+    assert resolved["event_id"] == "sr:match:123"
+
+
+def test_resolve_sportybet_over_under_for_creation():
+    fixture = _sample_sportybet_fixture_for_creation()
+    selection = _resolve_sportybet_pick(fixture, "Over 2.5")
+    assert selection["market_id"] == "18"
+    assert selection["specifier"] == "total=2.5"
+    assert selection["outcome_id"] == "12"
+
+
+def test_resolve_sportybet_double_chance_for_creation():
+    fixture = _sample_sportybet_fixture_for_creation()
+    selection = _resolve_sportybet_pick(fixture, "Double Chance X2")
+    assert selection["market_id"] == "10"
+    assert selection["outcome_name"] == "Draw or Away"
+
+
+def test_resolve_sportybet_btts_for_creation():
+    fixture = _sample_sportybet_fixture_for_creation()
+    selection = _resolve_sportybet_pick(fixture, "BTTS Yes")
+    assert selection["market_id"] == "29"
+    assert selection["outcome_name"] == "GG"
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -495,6 +597,11 @@ if __name__ == "__main__":
     test_sportybet_platform_probability_falls_back_to_odds()
     test_sportybet_default_summary_is_compact()
     test_sportybet_cached_views_filter_without_reanalysis()
+    test_parse_sportybet_booking_creation_request()
+    test_resolve_sportybet_fixture_for_creation()
+    test_resolve_sportybet_over_under_for_creation()
+    test_resolve_sportybet_double_chance_for_creation()
+    test_resolve_sportybet_btts_for_creation()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
