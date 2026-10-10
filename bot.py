@@ -3892,7 +3892,7 @@ def _build_model_ranked_sportybet_code(
         fixture
         for fixture in today_all
         if _league_code(str(fixture.get("league") or "")) is None
-    ][:12]
+    ][:40]
 
     def evaluate(fixture: dict[str, Any]) -> list[dict[str, Any]]:
         home = str(fixture.get("home_team") or "")
@@ -3927,15 +3927,23 @@ def _build_model_ranked_sportybet_code(
         and len(usable_groups) < requested_count
         and today_fallback
     ):
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            fallback_candidates = list(
-                executor.map(evaluate, today_fallback)
+        # Expand the fallback search progressively instead of hammering every
+        # remaining fixture at once. Stop as soon as the requested number of
+        # independently modelled matches is available.
+        fallback_batch_size = 8
+        for offset in range(0, len(today_fallback), fallback_batch_size):
+            batch = today_fallback[offset : offset + fallback_batch_size]
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                fallback_candidates = list(
+                    executor.map(evaluate, batch)
+                )
+            usable_groups.extend(
+                candidates
+                for candidates in fallback_candidates
+                if candidates
             )
-        usable_groups.extend(
-            candidates
-            for candidates in fallback_candidates
-            if candidates
-        )
+            if len(usable_groups) >= requested_count:
+                break
     if not usable_groups:
         return (
             f"I couldn't find independently modelled SportyBet selections "
