@@ -4317,7 +4317,18 @@ def _parse_auto_sportybet_code_request(
 ) -> tuple[int, float, bool] | None:
     """Parse casual requests for a model-ranked SportyBet code for today."""
     lowered = re.sub(r"\s+", " ", message.strip().casefold())
-    if "code" not in lowered or "today" not in lowered:
+    if "today" not in lowered:
+        return None
+
+    mentions_request_shape = (
+        "code" in lowered
+        or re.search(r"\b\d+(?:\.\d+)?\s*(?:odds|odd)\b", lowered)
+        or re.search(
+            r"\b\d+\s*[- ]?(?:game|games|match|matches|leg|legs)\b",
+            lowered,
+        )
+    )
+    if not mentions_request_shape:
         return None
 
     if not any(
