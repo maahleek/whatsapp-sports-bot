@@ -22,7 +22,14 @@ from twilio.rest import Client
 
 from betting_platforms import get_platform, platform_capability_summary, platform_market_name
 from rag import lookup_betting_term, search_knowledge
-from sportybet import SportyBetLookupError, extract_booking, fetch_booking, normalize_booking_code
+from sportybet import (
+    SportyBetLookupError,
+    create_booking,
+    extract_booking,
+    fetch_booking,
+    fetch_upcoming_fixtures,
+    normalize_booking_code,
+)
 
 load_dotenv()
 
@@ -2214,6 +2221,412 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
         return f"I couldn't analyse that SportyBet code right now: {exc}"
 
 
+def _parse_sportybet_booking_request(request: str) -> list[dict[str, str]]:
+    """Parse one selection per line/semicolon from a SportyBet code request."""
+    body = re.sub(
+        r"^\s*(?:create|make|generate|prepare)\s+(?:a\s+)?sportybet\s+"
+        r"(?:(?:booking|share)\s+)?code(?:\s+(?:for|from))?\s*:?\s*",
+        "",
+        request.strip(),
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    parts = [
+        re.sub(r"^\s*(?:[-•]|\d+[.)])\s*", "", part).strip()
+        for part in re.split(r"[;\n]+", body)
+        if part.strip()
+    ]
+    if not parts:
+        raise ValueError(
+            "Add at least one selection after 'Create SportyBet code:'."
+        )
+    if len(parts) > 20:
+        raise ValueError(
+            "SportyBet booking-code creation is limited to 20 selections."
+        )
+
+    parsed: list[dict[str, str]] = []
+    for part in parts:
+        match = re.match(
+            r"^(.+?)\s+(?:vs\.?|versus)\s+(.+?)"
+            r"(?:\s*\|\s*|\s+-\s+|\s*:\s+)(.+)$",
+            part,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            raise ValueError(
+                "I couldn't read this selection: "
+                f"{part}. Use 'Team A vs Team B | Pick' with one selection "
+                "per line or separated by semicolons."
+            )
+
+        parsed.append(
+            {
+                "team1": match.group(1).strip(),
+                "team2": match.group(2).strip(),
+                "pick": match.group(3).strip(),
+            }
+        )
+
+    return parsed
+
+
+def _sportybet_team_key(value: str) -> str:
+    tokens = _normalize_team_name(value).split()
+    aliases = {
+        "utd": "united",
+        "st": "saint",
+    }
+    return " ".join(aliases.get(token, token) for token in tokens)
+
+
+def _sportybet_team_match_score(requested: str, actual: str) -> int:
+    req = _sportybet_team_key(requested)
+    act = _sportybet_team_key(actual)
+    if not req or not act:
+        return 0
+    if req == act:
+        return 100
+    if len(req) >= 4 and req in act:
+        return 88
+    if len(act) >= 4 and act in req:
+        return 84
+
+    req_tokens = set(req.split())
+    act_tokens = set(act.split())
+    overlap = len(req_tokens & act_tokens)
+    if not overlap:
+        return 0
+
+    union = len(req_tokens | act_tokens)
+    return int(70 * overlap / max(1, union))
+
+
+def _resolve_sportybet_fixture(
+    fixtures: list[dict[str, Any]],
+    team1: str,
+    team2: str,
+) -> dict[str, Any]:
+    candidates: list[tuple[int, dict[str, Any]]] = []
+
+    for fixture in fixtures:
+        home = str(fixture.get("home_team") or "")
+        away = str(fixture.get("away_team") or "")
+
+        direct = (
+            _sportybet_team_match_score(team1, home)
+            + _sportybet_team_match_score(team2, away)
+        )
+        reverse = (
+            _sportybet_team_match_score(team1, away)
+            + _sportybet_team_match_score(team2, home)
+        )
+        score = max(direct, reverse)
+        if score >= 130:
+            candidates.append((score, fixture))
+
+    if not candidates:
+        raise ValueError(
+            f"I couldn't find an upcoming SportyBet fixture for {team1} vs {team2}."
+        )
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best_score = candidates[0][0]
+    best = [fixture for score, fixture in candidates if score == best_score]
+
+    if len(best) > 1:
+        names = ", ".join(
+            f"{item.get('home_team')} vs {item.get('away_team')}"
+            for item in best[:3]
+        )
+        raise ValueError(
+            f"More than one SportyBet fixture matched {team1} vs {team2}: {names}. "
+            "Use the exact SportyBet team names."
+        )
+
+    fixture = best[0]
+    if str(fixture.get("match_status") or "Not start") != "Not start":
+        raise ValueError(
+            f"{fixture.get('home_team')} vs {fixture.get('away_team')} "
+            "is no longer open as a pre-match fixture."
+        )
+
+    start_ms = int(fixture.get("start_ms") or 0)
+    if start_ms and start_ms <= int(datetime.now(timezone.utc).timestamp() * 1000):
+        raise ValueError(
+            f"{fixture.get('home_team')} vs {fixture.get('away_team')} has already started."
+        )
+
+    return fixture
+
+
+def _sportybet_market(
+    fixture: dict[str, Any],
+    market_id: str,
+    *,
+    total: float | None = None,
+) -> dict[str, Any]:
+    matches = [
+        market
+        for market in fixture.get("markets") or []
+        if str(market.get("market_id") or "") == market_id
+    ]
+
+    if total is not None:
+        filtered: list[dict[str, Any]] = []
+        for market in matches:
+            specifier = str(market.get("specifier") or "")
+            line = _specifier_number(specifier, "total")
+            if line is not None and abs(line - total) < 0.001:
+                filtered.append(market)
+        matches = filtered
+
+    matches = [
+        market
+        for market in matches
+        if int(market.get("status") or 0) == 0
+    ]
+
+    if not matches:
+        label = f" {total:g}" if total is not None else ""
+        raise ValueError(
+            f"SportyBet does not currently offer the requested market{label} "
+            f"for {fixture.get('home_team')} vs {fixture.get('away_team')}."
+        )
+
+    return matches[0]
+
+
+def _sportybet_outcome(
+    market: dict[str, Any],
+    accepted_names: set[str],
+) -> dict[str, Any]:
+    normalized_names = {
+        re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip()
+        for name in accepted_names
+    }
+
+    for outcome in market.get("outcomes") or []:
+        if not outcome.get("is_active", False):
+            continue
+        name = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            str(outcome.get("outcome_name") or "").casefold(),
+        ).strip()
+        if name in normalized_names:
+            return outcome
+
+    available = ", ".join(
+        str(outcome.get("outcome_name") or "")
+        for outcome in market.get("outcomes") or []
+        if outcome.get("is_active", False)
+    )
+    raise ValueError(
+        f"That selection is not currently available on SportyBet. "
+        f"Available outcomes: {available or 'none'}."
+    )
+
+
+def _resolve_sportybet_pick(
+    fixture: dict[str, Any],
+    pick: str,
+) -> dict[str, Any]:
+    raw = re.sub(r"\s+", " ", pick.strip())
+    lowered = raw.casefold()
+    home = str(fixture.get("home_team") or "")
+    away = str(fixture.get("away_team") or "")
+
+    total_match = re.fullmatch(
+        r"(over|under)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:goals?)?",
+        lowered,
+    )
+    if total_match:
+        side = total_match.group(1)
+        line = float(total_match.group(2))
+        market = _sportybet_market(fixture, "18", total=line)
+        outcome = _sportybet_outcome(market, {side})
+        return {
+            "event_id": fixture["event_id"],
+            "market_id": market["market_id"],
+            "specifier": market.get("specifier"),
+            "outcome_id": outcome["outcome_id"],
+            "home_team": home,
+            "away_team": away,
+            "market_name": market["market_name"],
+            "outcome_name": outcome["outcome_name"],
+            "odds": outcome.get("odds"),
+        }
+
+    btts_match = re.fullmatch(
+        r"(?:btts|both teams to score)\s*(yes|no|gg|ng)",
+        lowered,
+    )
+    if btts_match:
+        choice = btts_match.group(1)
+        market = _sportybet_market(fixture, "29")
+        accepted = {"yes", "gg"} if choice in {"yes", "gg"} else {"no", "ng"}
+        outcome = _sportybet_outcome(market, accepted)
+        return {
+            "event_id": fixture["event_id"],
+            "market_id": market["market_id"],
+            "specifier": market.get("specifier"),
+            "outcome_id": outcome["outcome_id"],
+            "home_team": home,
+            "away_team": away,
+            "market_name": market["market_name"],
+            "outcome_name": outcome["outcome_name"],
+            "odds": outcome.get("odds"),
+        }
+
+    dc_match = re.fullmatch(
+        r"(?:double chance\s*)?(1x|x2|12|home or draw|draw or away|home or away)",
+        lowered,
+    )
+    if dc_match:
+        choice = dc_match.group(1)
+        market = _sportybet_market(fixture, "10")
+        aliases = {
+            "1x": {"home or draw", "1x"},
+            "home or draw": {"home or draw", "1x"},
+            "x2": {"draw or away", "x2"},
+            "draw or away": {"draw or away", "x2"},
+            "12": {"home or away", "12"},
+            "home or away": {"home or away", "12"},
+        }
+        outcome = _sportybet_outcome(market, aliases[choice])
+        return {
+            "event_id": fixture["event_id"],
+            "market_id": market["market_id"],
+            "specifier": market.get("specifier"),
+            "outcome_id": outcome["outcome_id"],
+            "home_team": home,
+            "away_team": away,
+            "market_name": market["market_name"],
+            "outcome_name": outcome["outcome_name"],
+            "odds": outcome.get("odds"),
+        }
+
+    market = _sportybet_market(fixture, "1")
+    home_key = _sportybet_team_key(home)
+    away_key = _sportybet_team_key(away)
+    pick_key = _sportybet_team_key(
+        re.sub(r"\b(?:to win|win|wins)\b", "", lowered).strip()
+    )
+
+    if lowered in {"1", "home", "home win"} or pick_key == home_key:
+        outcome = _sportybet_outcome(market, {"home", "1"})
+    elif lowered in {"x", "draw"}:
+        outcome = _sportybet_outcome(market, {"draw", "x"})
+    elif lowered in {"2", "away", "away win"} or pick_key == away_key:
+        outcome = _sportybet_outcome(market, {"away", "2"})
+    else:
+        raise ValueError(
+            f"I can't create '{pick}' yet. Supported code-creation picks are "
+            "1X2/Home/Draw/Away, Double Chance 1X/X2/12, BTTS Yes/No, "
+            "and full-match Over/Under goals."
+        )
+
+    return {
+        "event_id": fixture["event_id"],
+        "market_id": market["market_id"],
+        "specifier": market.get("specifier"),
+        "outcome_id": outcome["outcome_id"],
+        "home_team": home,
+        "away_team": away,
+        "market_name": market["market_name"],
+        "outcome_name": outcome["outcome_name"],
+        "odds": outcome.get("odds"),
+    }
+
+
+def _create_sportybet_code_from_request(request: str) -> str:
+    requested = _parse_sportybet_booking_request(request)
+    team_pairs = [
+        (item["team1"], item["team2"])
+        for item in requested
+    ]
+
+    fixtures = fetch_upcoming_fixtures(
+        team_pairs=team_pairs,
+        market_ids=("1", "10", "18", "29"),
+    )
+
+    resolved: list[dict[str, Any]] = []
+    for item in requested:
+        fixture = _resolve_sportybet_fixture(
+            fixtures,
+            item["team1"],
+            item["team2"],
+        )
+        resolved.append(
+            _resolve_sportybet_pick(
+                fixture,
+                item["pick"],
+            )
+        )
+
+    booking = create_booking(resolved)
+    booked_selections = booking.get("selections") or []
+
+    live_odds = [
+        float(item["odds"])
+        for item in booked_selections
+        if isinstance(item.get("odds"), (int, float))
+        and float(item["odds"]) > 0
+    ]
+    combined_odds = None
+    if booked_selections and len(live_odds) == len(booked_selections):
+        combined_odds = math.prod(live_odds)
+
+    lines = [
+        f"SportyBet booking code created: {booking.get('share_code')}",
+        f"Selections: {len(booked_selections) or len(resolved)}",
+    ]
+    if combined_odds is not None:
+        lines.append(f"Combined odds: {combined_odds:.2f}")
+
+    lines.append("")
+    display_records = booked_selections or resolved
+    for index, item in enumerate(display_records, start=1):
+        odds = item.get("odds")
+        odds_text = (
+            f" @ {float(odds):.2f}"
+            if isinstance(odds, (int, float))
+            else ""
+        )
+        lines.append(
+            f"{index}. {item.get('home_team')} vs {item.get('away_team')} - "
+            f"{item.get('market_name')}: {item.get('outcome_name')}{odds_text}"
+        )
+
+    share_url = str(booking.get("share_url") or "").strip()
+    if share_url:
+        lines.extend(["", f"Share URL: {share_url}"])
+
+    lines.extend(
+        [
+            "",
+            "This only prepares a SportyBet betslip reservation. No wager was placed and no stake was submitted.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+@tool
+def create_sportybet_booking_code(request: str) -> str:
+    """Create a non-staking SportyBet booking/share code from explicit selections."""
+    try:
+        return _create_sportybet_code_from_request(request)
+    except ValueError as exc:
+        return str(exc)
+    except SportyBetLookupError as exc:
+        return str(exc)
+    except Exception as exc:
+        return f"I couldn't create that SportyBet booking code right now: {exc}"
+
+
 @tool
 def search_betting_knowledge(question: str) -> str:
     """Explain football betting terms and market settlement using the local knowledge base."""
@@ -2359,6 +2772,7 @@ TOOLS = [
     predict_betting_markets,
     format_prediction_for_platform,
     analyse_sportybet_booking_code,
+    create_sportybet_booking_code,
     search_betting_knowledge,
     search_football_knowledge,
     get_league_fixtures,
@@ -2392,7 +2806,7 @@ Rules:
 4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
 5. Use the match prediction tool when the user asks who is likely to win, the correct-score projection tool for exact-score requests, and the betting-market probability tool for markets such as 1X2, double chance, draw no bet, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score.
 6. Use the betting terminology knowledge-base tool when the user asks what a betting term or market means, including Asian handicap, double chance, draw no bet, BTTS, over/under, accumulators, push/void, and similar terms.
-7. Use the betting-platform formatting tool when the user asks for predictions formatted for SportyBet, Bet9ja, BetKing, MSport, 1xBet, or Betway. Use the SportyBet booking-code analysis tool when the user asks to load, check, review, or analyse an existing SportyBet code. The SportyBet lookup is experimental and read-only because it uses an undocumented website endpoint. Do not claim to place a wager or generate a booking code unless a supported integration is explicitly configured.
+7. Use the betting-platform formatting tool when the user asks for predictions formatted for SportyBet, Bet9ja, BetKing, MSport, 1xBet, or Betway. Use the SportyBet booking-code analysis tool when the user asks to load, check, review, or analyse an existing SportyBet code. Use the SportyBet booking-code creation tool only when the user explicitly asks to create/prepare a SportyBet share code from selections. Booking-code creation is a non-staking betslip reservation only; never claim a wager was placed and never submit a stake. The SportyBet web integration is undocumented and may change.
 8. Betting-market outputs are statistical probability estimates only. Never promise a guaranteed win, call a selection risk-free, or recommend a stake size or bankroll percentage.
 9. Keep WhatsApp responses concise, readable, and conversational.
 10. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
@@ -2480,6 +2894,19 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     """Route guarded factual intents directly to deterministic tools."""
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.casefold()
+
+    sportybet_create_match = re.match(
+        r"^\s*(?:create|make|generate|prepare)\s+(?:a\s+)?sportybet\s+"
+        r"(?:(?:booking|share)\s+)?code\b",
+        message,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if sportybet_create_match:
+        return str(
+            create_sportybet_booking_code.invoke(
+                {"request": message}
+            )
+        )
 
     cached_analysis = _cached_sportybet_analysis(user_id)
     cached_view_match = re.fullmatch(
@@ -2868,10 +3295,27 @@ def _send_whatsapp_message(to: str, body: str) -> None:
 
 
 def process_and_reply(message: str, sender: str) -> None:
+    lowered_message = message.casefold()
     if (
-        "sportybet" in message.casefold()
-        and "code" in message.casefold()
-        and any(word in message.casefold() for word in ("analyse", "analyze", "check", "review", "load"))
+        "sportybet" in lowered_message
+        and "code" in lowered_message
+        and any(
+            lowered_message.lstrip().startswith(word)
+            for word in ("create", "make", "generate", "prepare")
+        )
+    ):
+        try:
+            _send_whatsapp_message(
+                sender,
+                "SportyBet selections received. I’m resolving the live markets and preparing the share code now.",
+            )
+        except Exception as exc:
+            print(f"Twilio acknowledgement error for {sender}: {exc}")
+
+    if (
+        "sportybet" in lowered_message
+        and "code" in lowered_message
+        and any(word in lowered_message for word in ("analyse", "analyze", "check", "review", "load"))
     ):
         try:
             _send_whatsapp_message(
