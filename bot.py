@@ -2613,7 +2613,8 @@ def _select_records_for_target_odds(
         confidence = _sportybet_record_confidence(record)
         additions: list[tuple[float, float, tuple[int, ...]]] = []
         for log_sum, confidence_sum, chosen in states:
-            if exact_count is not None and len(chosen) >= exact_count:
+            max_allowed = exact_count if exact_count is not None else 20
+            if len(chosen) >= max_allowed:
                 continue
             new_log = log_sum + math.log(odd)
             if new_log > math.log(target_odds * 2.0):
@@ -3576,9 +3577,23 @@ def _sportybet_today_bounds_ms() -> tuple[int, int, str]:
     )
 
 
-def _build_model_ranked_sportybet_code(match_count: int) -> str:
+def _build_model_ranked_sportybet_code(
+    match_count: int = 0,
+    target_odds: float = 0.0,
+) -> str:
     """Build a non-staking SportyBet code from today's model-supported fixtures."""
-    match_count = max(1, min(int(match_count), 10))
+    requested_count = int(match_count) if int(match_count) > 0 else None
+    if requested_count is not None:
+        requested_count = min(requested_count, 10)
+
+    requested_target = (
+        float(target_odds)
+        if float(target_odds) > 1.0
+        else None
+    )
+    if requested_count is None and requested_target is None:
+        requested_count = 3
+
     start_ms, end_ms, date_text = _sportybet_today_bounds_ms()
 
     fixtures = fetch_upcoming_fixtures(
@@ -3600,9 +3615,7 @@ def _build_model_ranked_sportybet_code(match_count: int) -> str:
             "Try another date or create a code from explicit selections."
         )
 
-    # Keep this responsive. The fuller model is only run on a small set of
-    # current fixtures from competitions our structured data source supports.
-    today = today[:16]
+    today = today[:20]
 
     def evaluate(fixture: dict[str, Any]) -> list[dict[str, Any]]:
         home = str(fixture.get("home_team") or "")
@@ -3627,26 +3640,48 @@ def _build_model_ranked_sportybet_code(match_count: int) -> str:
     with ThreadPoolExecutor(max_workers=6) as executor:
         fixture_candidates = list(executor.map(evaluate, today))
 
-    selected: list[dict[str, Any]] = []
+    pool: list[dict[str, Any]] = []
     for candidates in fixture_candidates:
         if candidates:
-            selected.append(candidates[0])
+            # One market per match prevents correlated duplicate legs from
+            # the same fixture in an automatically generated code.
+            pool.append(candidates[0])
 
-    selected.sort(
+    pool.sort(
         key=lambda item: (
             float(item["model_probability"]),
             float(item["odds"]),
         ),
         reverse=True,
     )
-    selected = selected[:match_count]
 
-    if len(selected) < match_count:
+    if not pool:
         return (
-            f"I found only {len(selected)} independently modelled SportyBet "
-            f"selection(s) meeting the current quality filters for {date_text}; "
-            f"{match_count} were requested. No booking code was created."
+            f"I couldn't find independently modelled SportyBet selections "
+            f"meeting the current quality filters for {date_text}."
         )
+
+    if requested_target is not None:
+        try:
+            selected = _select_records_for_target_odds(
+                pool,
+                requested_target,
+                exact_count=requested_count,
+            )
+        except ValueError as exc:
+            return (
+                f"I couldn't build a suitable SportyBet code around "
+                f"{requested_target:.2f} odds: {exc}"
+            )
+    else:
+        count = requested_count or 3
+        selected = pool[:count]
+        if len(selected) < count:
+            return (
+                f"I found only {len(selected)} independently modelled SportyBet "
+                f"selection(s) meeting the current quality filters for {date_text}; "
+                f"{count} were requested. No booking code was created."
+            )
 
     booking = create_booking(selected)
     booked = booking.get("selections") or []
@@ -3660,7 +3695,7 @@ def _build_model_ranked_sportybet_code(match_count: int) -> str:
     combined = (
         math.prod(live_odds)
         if booked and len(live_odds) == len(booked)
-        else None
+        else _sportybet_combined_odds(selected)
     )
 
     lines = [
@@ -3668,6 +3703,8 @@ def _build_model_ranked_sportybet_code(match_count: int) -> str:
         f"Date: {date_text}",
         f"Selections: {len(booked) or len(selected)}",
     ]
+    if requested_target is not None:
+        lines.append(f"Requested target odds: {requested_target:.2f}")
     if combined is not None:
         lines.append(f"Combined odds: {combined:.2f}")
 
@@ -3698,6 +3735,14 @@ def _build_model_ranked_sportybet_code(match_count: int) -> str:
     if share_url:
         lines.extend(["", f"Share URL: {share_url}"])
 
+    if requested_target is not None:
+        lines.extend(
+            [
+                "",
+                "The target odds are approximate. The bot prioritizes stronger model-supported selections instead of forcing an exact total with a weaker pick.",
+            ]
+        )
+
     lines.extend(
         [
             "",
@@ -3709,10 +3754,16 @@ def _build_model_ranked_sportybet_code(match_count: int) -> str:
 
 
 @tool
-def build_model_ranked_sportybet_code(match_count: int = 3) -> str:
-    """Build a non-staking SportyBet code from today's highest model-supported selections."""
+def build_model_ranked_sportybet_code(
+    match_count: int = 0,
+    target_odds: float = 0.0,
+) -> str:
+    """Build a non-staking SportyBet code from today's high model-supported selections."""
     try:
-        return _build_model_ranked_sportybet_code(match_count)
+        return _build_model_ranked_sportybet_code(
+            match_count=match_count,
+            target_odds=target_odds,
+        )
     except ValueError as exc:
         return str(exc)
     except SportyBetLookupError as exc:
@@ -3985,23 +4036,200 @@ def _current_turn_tool_outputs(messages: list[Any]) -> list[str]:
     return outputs
 
 
+def _parse_auto_sportybet_code_request(
+    message: str,
+) -> tuple[int, float] | None:
+    """Parse casual requests for a model-ranked SportyBet code for today."""
+    lowered = re.sub(r"\s+", " ", message.strip().casefold())
+    if "code" not in lowered or "today" not in lowered:
+        return None
+
+    if not any(
+        token in lowered
+        for token in (
+            "give", "build", "make", "create", "generate", "prepare",
+            "random", "sure", "safe", "high support",
+        )
+    ):
+        return None
+
+    count_match = re.search(
+        r"\b(\d+)\s*[- ]?(?:game|games|match|matches|leg|legs)\b",
+        lowered,
+    )
+    odds_match = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(?:odds|odd)\b",
+        lowered,
+    )
+
+    match_count = int(count_match.group(1)) if count_match else 0
+    target_odds = float(odds_match.group(1)) if odds_match else 0.0
+
+    if match_count == 0 and target_odds == 0.0:
+        match_count = 3
+
+    return match_count, target_odds
+
+
 def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     """Route guarded factual intents directly to deterministic tools."""
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.casefold()
 
-    sportybet_auto_code_match = re.match(
-        r"^\s*(?:build|make|create|generate|prepare)\s+(?:me\s+)?(?:a\s+)?"
-        r"(?:(\d+)\s*[- ]?(?:match|leg)\s+)?sportybet\s+"
-        r"(?:(?:booking|share)\s+)?code\s+(?:for\s+)?today(?:'s)?\s*(?:games|matches)?[?.!]*\s*$",
+    # Existing-code editor commands operate on a per-user working slip.
+    direct_code_shorten = re.fullmatch(
+        r"(?:shorten|reduce|trim)\s+(?:sportybet\s+)?(?:booking\s+)?code\s+"
+        r"([A-Z0-9]{4,12})\s+(?:to|down to)\s+(\d+)\s+"
+        r"(?:selections|picks|legs|games)",
         normalized,
         flags=re.IGNORECASE,
     )
-    if sportybet_auto_code_match:
-        match_count = int(sportybet_auto_code_match.group(1) or 3)
+    if direct_code_shorten:
+        try:
+            analysis = _run_sportybet_booking_analysis(
+                direct_code_shorten.group(1)
+            )
+            _cache_sportybet_analysis(user_id, analysis)
+            _initialize_sportybet_working_slip(user_id, analysis)
+            return _keep_top_sportybet_slip(
+                user_id,
+                int(direct_code_shorten.group(2)),
+            )
+        except (ValueError, SportyBetLookupError) as exc:
+            return str(exc)
+
+    direct_code_target = re.fullmatch(
+        r"(?:shorten|reduce|trim|edit)\s+(?:sportybet\s+)?(?:booking\s+)?code\s+"
+        r"([A-Z0-9]{4,12})\s+(?:to|around|about|towards?)\s+"
+        r"(\d+(?:\.\d+)?)\s*(?:odds|odd)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if direct_code_target:
+        try:
+            analysis = _run_sportybet_booking_analysis(
+                direct_code_target.group(1)
+            )
+            _cache_sportybet_analysis(user_id, analysis)
+            _initialize_sportybet_working_slip(user_id, analysis)
+            return _target_sportybet_slip_odds(
+                user_id,
+                float(direct_code_target.group(2)),
+            )
+        except (ValueError, SportyBetLookupError) as exc:
+            return str(exc)
+
+    if re.fullmatch(
+        r"(?:show|display|list)(?:\s+the|\s+my)?\s+(?:current\s+)?"
+        r"(?:working\s+)?(?:sportybet\s+)?slip[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return _format_sportybet_working_slip(user_id)
+
+    if re.fullmatch(r"undo(?:\s+last)?[?.!]?", normalized, flags=re.IGNORECASE):
+        return _undo_sportybet_slip(user_id)
+
+    if re.fullmatch(r"redo(?:\s+last)?[?.!]?", normalized, flags=re.IGNORECASE):
+        return _redo_sportybet_slip(user_id)
+
+    if re.fullmatch(
+        r"(?:remove|drop|delete)\s+(?:all\s+)?(?:the\s+)?"
+        r"(?:unmodelled|unmodeled)(?:\s+(?:selections|picks|legs))?[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return _remove_unmodelled_sportybet_slip(user_id)
+
+    if re.fullmatch(
+        r"(?:remove|drop|delete)\s+(?:all\s+)?(?:the\s+)?"
+        r"(?:lower[- ]support|low[- ]support)(?:\s+(?:selections|picks|legs))?[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return _remove_lower_support_sportybet_slip(user_id)
+
+    lowest_match = re.fullmatch(
+        r"(?:remove|drop|delete)\s+(?:the\s+)?lowest\s+(\d+)"
+        r"(?:\s+(?:selections|picks|legs))?[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if lowest_match:
+        return _remove_lowest_sportybet_slip(
+            user_id,
+            int(lowest_match.group(1)),
+        )
+
+    keep_top_match = re.fullmatch(
+        r"(?:(?:keep|retain)\s+(?:only\s+)?(?:the\s+)?"
+        r"(?:strongest|best|top)\s+(\d+)|"
+        r"(?:shorten|reduce|trim)(?:\s+(?:it|this|the slip))?\s+"
+        r"(?:to|down to)\s+(\d+))"
+        r"(?:\s+(?:selections|picks|legs|games))?[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if keep_top_match:
+        count_text = keep_top_match.group(1) or keep_top_match.group(2)
+        return _keep_top_sportybet_slip(user_id, int(count_text))
+
+    remove_numbers_match = re.fullmatch(
+        r"(?:remove|drop|delete)(?:\s+(?:selections?|picks?|legs?))?\s+"
+        r"([0-9,\sand]+)[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if remove_numbers_match:
+        indexes = [
+            int(item)
+            for item in re.findall(r"\d+", remove_numbers_match.group(1))
+        ]
+        return _remove_sportybet_slip_indexes(user_id, indexes)
+
+    replace_safer_match = re.fullmatch(
+        r"(?:replace|change)\s+(?:selection\s+)?(\d+)\s+"
+        r"(?:with|to)\s+(?:a\s+)?(?:safer|stronger|higher[- ]support)"
+        r"(?:\s+(?:market|pick|selection))?[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if replace_safer_match:
+        return _replace_sportybet_slip_with_safer_market(
+            user_id,
+            int(replace_safer_match.group(1)),
+        )
+
+    target_current_match = re.fullmatch(
+        r"(?:(?:shorten|reduce|trim|adjust)(?:\s+(?:it|this|the slip))?\s+"
+        r"(?:to|around|about|towards?)\s+|target\s+)"
+        r"(\d+(?:\.\d+)?)\s*(?:odds|odd)[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if target_current_match:
+        return _target_sportybet_slip_odds(
+            user_id,
+            float(target_current_match.group(1)),
+        )
+
+    if re.fullmatch(
+        r"(?:create|make|generate|prepare)\s+(?:the\s+)?(?:new|edited|current)"
+        r"(?:\s+sportybet)?\s+(?:booking\s+|share\s+)?code[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return _create_code_from_working_sportybet_slip(user_id)
+
+    auto_request = _parse_auto_sportybet_code_request(message)
+    if auto_request is not None:
+        match_count, target_odds = auto_request
         return str(
             build_model_ranked_sportybet_code.invoke(
-                {"match_count": match_count}
+                {
+                    "match_count": match_count,
+                    "target_odds": target_odds,
+                }
             )
         )
 
@@ -4407,13 +4635,7 @@ def _send_whatsapp_message(to: str, body: str) -> None:
 def process_and_reply(message: str, sender: str) -> None:
     lowered_message = message.casefold()
     auto_code_request = (
-        "sportybet" in lowered_message
-        and "code" in lowered_message
-        and "today" in lowered_message
-        and any(
-            lowered_message.lstrip().startswith(word)
-            for word in ("build", "create", "make", "generate", "prepare")
-        )
+        _parse_auto_sportybet_code_request(message) is not None
     )
     if auto_code_request:
         try:
