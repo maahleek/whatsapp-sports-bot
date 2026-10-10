@@ -16,6 +16,7 @@ from bot import (
     _format_sportybet_cached_view,
     _parse_sportybet_booking_request,
     _resolve_sportybet_fixture,
+    _sportybet_fixture_suggestions,
     _resolve_sportybet_pick,
     _total_line_settlement,
     _remember_matchup,
@@ -525,6 +526,34 @@ def test_parse_sportybet_booking_creation_request():
     assert parsed[0]["pick"] == "Over 2.5"
 
 
+def test_sportybet_fixture_suggestions_for_unavailable_matchup():
+    fixtures = [
+        {
+            "event_id": "1",
+            "home_team": "Arsenal",
+            "away_team": "Leeds United",
+            "start_ms": 9999999999999,
+            "match_status": "Not start",
+            "markets": [],
+        },
+        {
+            "event_id": "2",
+            "home_team": "Chelsea",
+            "away_team": "AFC Bournemouth",
+            "start_ms": 9999999999999,
+            "match_status": "Not start",
+            "markets": [],
+        },
+    ]
+    suggestions = _sportybet_fixture_suggestions(
+        fixtures,
+        "Arsenal",
+        "Chelsea",
+    )
+    assert "Arsenal vs Leeds United" in suggestions
+    assert "Chelsea vs AFC Bournemouth" in suggestions
+
+
 def test_resolve_sportybet_fixture_for_creation():
     fixture = _sample_sportybet_fixture_for_creation()
     resolved = _resolve_sportybet_fixture(
@@ -598,6 +627,7 @@ if __name__ == "__main__":
     test_sportybet_default_summary_is_compact()
     test_sportybet_cached_views_filter_without_reanalysis()
     test_parse_sportybet_booking_creation_request()
+    test_sportybet_fixture_suggestions_for_unavailable_matchup()
     test_resolve_sportybet_fixture_for_creation()
     test_resolve_sportybet_over_under_for_creation()
     test_resolve_sportybet_double_chance_for_creation()
