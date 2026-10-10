@@ -1887,12 +1887,20 @@ def _run_sportybet_booking_analysis(booking_code: str) -> dict[str, Any]:
     def evaluate_selection(selection: dict[str, Any]) -> dict[str, Any]:
         market_name = str(selection.get("market_name") or "Unknown market")
         if not _sportybet_market_can_model(selection):
-            return {"probability": None, "label": market_name}
+            return {
+                "probability": None,
+                "label": market_name,
+                "reason": "unsupported_market",
+            }
 
         home = str(selection.get("home_team") or "").strip()
         away = str(selection.get("away_team") or "").strip()
         if not home or not away:
-            return {"probability": None, "label": market_name}
+            return {
+                "probability": None,
+                "label": market_name,
+                "reason": "missing_match_data",
+            }
 
         try:
             context = _build_prediction_context(
@@ -1906,15 +1914,27 @@ def _run_sportybet_booking_analysis(booking_code: str) -> dict[str, Any]:
                 context.get("projection") is None
                 or not _sportybet_context_has_enough_data(context)
             ):
-                return {"probability": None, "label": market_name}
+                return {
+                    "probability": None,
+                    "label": market_name,
+                    "reason": "insufficient_independent_data",
+                }
 
             probability, label = _sportybet_selection_model_support(
                 context,
                 selection,
             )
-            return {"probability": probability, "label": label}
+            return {
+                "probability": probability,
+                "label": label,
+                "reason": "modelled" if probability is not None else "unsupported_market",
+            }
         except Exception:
-            return {"probability": None, "label": market_name}
+            return {
+                "probability": None,
+                "label": market_name,
+                "reason": "independent_data_error",
+            }
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         evaluations = list(executor.map(evaluate_selection, selections))
@@ -1931,6 +1951,9 @@ def _run_sportybet_booking_analysis(booking_code: str) -> dict[str, Any]:
         )
         model_probability = evaluation["probability"]
         model_label = evaluation["label"]
+        model_reason = evaluation.get("reason") or (
+            "modelled" if model_probability is not None else "independent_data_unavailable"
+        )
 
         alignment = None
         gap = None
@@ -1962,6 +1985,7 @@ def _run_sportybet_booking_analysis(booking_code: str) -> dict[str, Any]:
                 "model_label": model_label,
                 "alignment": alignment,
                 "gap": gap,
+                "model_reason": model_reason,
             }
         )
 
@@ -2009,22 +2033,44 @@ def _format_sportybet_analysis_summary(analysis: dict[str, Any]) -> str:
                 f"({record['gap']:+.1f} pp)"
             )
 
-    unmodelled_markets: list[str] = []
+    unsupported_markets: list[str] = []
     seen_markets: set[str] = set()
+    insufficient_count = 0
+    error_count = 0
+
     for record in records:
         if record.get("model_probability") is not None:
             continue
-        market = str(record.get("market_name") or "Unknown market")
-        key = market.casefold()
-        if key not in seen_markets:
-            seen_markets.add(key)
-            unmodelled_markets.append(market)
 
-    if unmodelled_markets:
-        preview = ", ".join(unmodelled_markets[:5])
-        if len(unmodelled_markets) > 5:
-            preview += f", +{len(unmodelled_markets) - 5} more"
-        lines.extend(["", f"Currently unmodelled markets: {preview}"])
+        reason = str(record.get("model_reason") or "")
+        if reason == "unsupported_market":
+            market = str(record.get("market_name") or "Unknown market")
+            key = market.casefold()
+            if key not in seen_markets:
+                seen_markets.add(key)
+                unsupported_markets.append(market)
+        elif reason in {"insufficient_independent_data", "missing_match_data"}:
+            insufficient_count += 1
+        elif reason == "independent_data_error":
+            error_count += 1
+
+    if unsupported_markets:
+        preview = ", ".join(unsupported_markets[:5])
+        if len(unsupported_markets) > 5:
+            preview += f", +{len(unsupported_markets) - 5} more"
+        lines.extend(["", f"Unsupported market types: {preview}"])
+
+    if insufficient_count:
+        lines.append(
+            f"Supported selections lacking enough independent football data: "
+            f"{insufficient_count}"
+        )
+
+    if error_count:
+        lines.append(
+            f"Selections skipped because an independent data source failed: "
+            f"{error_count}"
+        )
 
     lines.extend(
         [
@@ -2061,7 +2107,15 @@ def _format_sportybet_record(record: dict[str, Any]) -> str:
 
     model_probability = record.get("model_probability")
     if model_probability is None:
-        lines.append("- Independent model comparison: unavailable")
+        reason = str(record.get("model_reason") or "")
+        if reason == "unsupported_market":
+            lines.append("- Independent model comparison: market not currently modelled")
+        elif reason in {"insufficient_independent_data", "missing_match_data"}:
+            lines.append("- Independent model comparison: not enough independent football data")
+        elif reason == "independent_data_error":
+            lines.append("- Independent model comparison: independent data source unavailable")
+        else:
+            lines.append("- Independent model comparison: unavailable")
     else:
         lines.append(
             f"- Independent model support: {model_probability * 100:.1f}% "
