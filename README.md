@@ -321,3 +321,38 @@ Build me a 3-match SportyBet code for today's games
 The bot fetches today's current SportyBet pre-match catalogue, limits the scan to competitions supported by the independent football model, evaluates supported 1X2, Double Chance, BTTS, and full-match goal-total markets, keeps selections that meet the current model/odds quality filters, and prepares a non-staking SportyBet share code.
 
 This is an experimental model-ranking workflow, not a guarantee of results or profitability. It never submits a stake or places a wager.
+
+
+### Editable SportyBet working slip
+
+When an existing SportyBet code is analysed or loaded, the bot also creates an in-memory working slip for that WhatsApp user. The original SportyBet code is never modified in place. Edits are applied to the working slip and a new share code is created only when the user asks for it.
+
+Examples:
+
+```text
+Load SportyBet code HD46GX
+Shorten to 10 selections
+Remove 3, 7 and 12
+Remove all unmodelled selections
+Remove lower-support selections
+Remove the lowest 5
+Replace selection 4 with a safer market
+Target 5 odds
+Undo
+Redo
+Show current slip
+Create the new code
+```
+
+The editor keeps a bounded undo/redo history per user. "Safer" means a different currently available market with higher independent model support when one can be verified; it is never presented as guaranteed.
+
+The bot also accepts casual same-day code requests such as:
+
+```text
+Give me a sure code for today
+Give me a 5-game code for today
+Give me a code around 5 odds for today
+Give me a 4-game code around 3 odds for today
+```
+
+Words such as "sure" are interpreted as a request for higher model support, not as a guarantee. Target odds are approximate: the selection optimizer prioritizes independently modelled candidates and does not force the requested total by adding a weaker pick.
