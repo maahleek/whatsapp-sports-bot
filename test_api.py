@@ -18,6 +18,7 @@ from bot import (
     _resolve_sportybet_fixture,
     _sportybet_fixture_suggestions,
     _resolve_sportybet_pick,
+    _sportybet_auto_candidates_for_fixture,
     _total_line_settlement,
     _remember_matchup,
     _last_matchup,
@@ -587,6 +588,31 @@ def test_resolve_sportybet_btts_for_creation():
     assert selection["outcome_name"] == "GG"
 
 
+def test_sportybet_auto_candidates_rank_supported_markets():
+    fixture = _sample_sportybet_fixture_for_creation()
+    projection = _score_projection(
+        (2.0, 0.8),
+        (1.1, 1.6),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Chelsea", "date": "2026-10-10"},
+        "first_name": "Arsenal",
+        "second_name": "Chelsea",
+        "first_is_home": True,
+        "first_season": {"played": 8},
+        "second_season": {"played": 8},
+        "first_recent": None,
+        "second_recent": None,
+    }
+    candidates = _sportybet_auto_candidates_for_fixture(fixture, context)
+    assert candidates
+    assert all(item["event_id"] == "sr:match:123" for item in candidates)
+    assert all(item["model_probability"] >= 0.55 for item in candidates)
+    assert all(1.20 <= item["odds"] <= 3.50 for item in candidates)
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -633,6 +659,7 @@ if __name__ == "__main__":
     test_resolve_sportybet_over_under_for_creation()
     test_resolve_sportybet_double_chance_for_creation()
     test_resolve_sportybet_btts_for_creation()
+    test_sportybet_auto_candidates_rank_supported_markets()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
