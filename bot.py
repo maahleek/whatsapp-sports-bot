@@ -1555,7 +1555,7 @@ def format_prediction_for_platform(
 
 def _specifier_number(text: str, key: str) -> float | None:
     match = re.search(
-        rf"(?:^|[;,&\\s]){re.escape(key)}\\s*=\\s*([+-]?\\d+(?:\\.\\d+)?)",
+        rf"(?:^|[;,&\s]){re.escape(key)}\s*=\s*([+-]?\d+(?:\.\d+)?)",
         text or "",
         flags=re.IGNORECASE,
     )
@@ -1638,7 +1638,7 @@ def _sportybet_selection_model_support(
         line = _specifier_number(specifier, "total")
         if line is None:
             joined = f"{market} {outcome}"
-            number = re.search(r"([0-9]+(?:\\.[0-9]+)?)", joined)
+            number = re.search(r"([0-9]+(?:\.[0-9]+)?)", joined)
             if number:
                 line = float(number.group(1))
         side = None
@@ -1673,7 +1673,7 @@ def _sportybet_selection_model_support(
                 return _settlement_support(settlement), f"{away} {away_line:+g}"
 
     if "correct score" in market or market_id == "45":
-        score = re.search(r"(\\d+)\\s*[-:]\\s*(\\d+)", outcome)
+        score = re.search(r"(\d+)\s*[-:]\s*(\d+)", outcome)
         if score:
             wanted_home = int(score.group(1))
             wanted_away = int(score.group(2))
@@ -2051,8 +2051,8 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     lowered = normalized.casefold()
 
     sportybet_code_match = re.search(
-        r"(?:analyse|analyze|check|review|load|get)\\s+(?:this\\s+)?"
-        r"(?:sportybet\\s+)?(?:booking\\s+|share\\s+)?code[:\\s]+([A-Z0-9]{4,12})\\b",
+        r"(?:analyse|analyze|check|review|load|get)\s+(?:this\s+)?"
+        r"(?:sportybet\s+)?(?:booking\s+|share\s+)?code[:\s]+([A-Z0-9]{4,12})\b",
         normalized,
         flags=re.IGNORECASE,
     )
@@ -2064,7 +2064,7 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
         )
 
     sportybet_code_short = re.fullmatch(
-        r"(?:sportybet\\s+)?(?:booking\\s+|share\\s+)?code[:\\s]+([A-Z0-9]{4,12})[?.!]?",
+        r"(?:sportybet\s+)?(?:booking\s+|share\s+)?code[:\s]+([A-Z0-9]{4,12})[?.!]?",
         normalized,
         flags=re.IGNORECASE,
     )
