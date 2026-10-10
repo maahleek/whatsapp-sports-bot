@@ -2499,7 +2499,10 @@ def _resolve_sportybet_pick(
         side = total_match.group(1)
         line = float(total_match.group(2))
         market = _sportybet_market(fixture, "18", total=line)
-        outcome = _sportybet_outcome(market, {side})
+        outcome = _sportybet_outcome(
+            market,
+            {side, f"{side} {line:g}"},
+        )
         return {
             "event_id": fixture["event_id"],
             "market_id": market["market_id"],
