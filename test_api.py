@@ -754,6 +754,48 @@ def test_working_slip_target_cannot_raise_existing_odds():
         os.environ["MEMORY_DB_PATH"] = previous_db
 
 
+def test_working_slip_target_already_met_is_idempotent():
+    previous_db = os.environ.get("MEMORY_DB_PATH")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ["MEMORY_DB_PATH"] = os.path.join(temp_dir, "memory.db")
+        user_id = "sportybet-target-idempotent-test"
+        analysis = {
+            "code": "ABC123",
+            "records": [
+                {
+                    "index": 1,
+                    "source_index": 1,
+                    "home_team": "A",
+                    "away_team": "B",
+                    "outcome_name": "Home",
+                    "odds": 2.0,
+                    "model_probability": 0.70,
+                },
+                {
+                    "index": 2,
+                    "source_index": 2,
+                    "home_team": "C",
+                    "away_team": "D",
+                    "outcome_name": "Over 1.5",
+                    "odds": 2.5,
+                    "model_probability": 0.72,
+                },
+            ],
+        }
+        _initialize_sportybet_working_slip(user_id, analysis)
+        before = _sportybet_working_slip(user_id)
+        response = _target_sportybet_slip_odds(user_id, 5.0)
+        after = _sportybet_working_slip(user_id)
+        assert "already about 5.00 odds" in response
+        assert before is not None and after is not None
+        assert len(after["undo"]) == len(before["undo"])
+
+    if previous_db is None:
+        os.environ.pop("MEMORY_DB_PATH", None)
+    else:
+        os.environ["MEMORY_DB_PATH"] = previous_db
+
+
 def test_working_slip_remove_undo_redo():
     previous_db = os.environ.get("MEMORY_DB_PATH")
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -835,7 +877,8 @@ def test_platform_capability_is_honest_about_booking_codes():
     assert platform is not None
     summary = platform_capability_summary(platform)
     assert "supports booking/share codes" in summary
-    assert "experimental read-only lookup" in summary
+    assert "experimental lookup" in summary
+    assert "experimental non-staking share-code creation" in summary
     assert "automatic wager placement is not enabled" in summary
 
 
@@ -875,6 +918,7 @@ if __name__ == "__main__":
     test_grouped_target_odds_can_use_alternate_markets()
     test_grouped_target_odds_random_mode_stays_near_target()
     test_working_slip_target_cannot_raise_existing_odds()
+    test_working_slip_target_already_met_is_idempotent()
     test_working_slip_remove_undo_redo()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
