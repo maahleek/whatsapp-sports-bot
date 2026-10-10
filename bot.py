@@ -2303,6 +2303,41 @@ def _sportybet_team_match_score(requested: str, actual: str) -> int:
     return int(70 * overlap / max(1, union))
 
 
+def _sportybet_fixture_suggestions(
+    fixtures: list[dict[str, Any]],
+    team1: str,
+    team2: str,
+    limit: int = 4,
+) -> list[str]:
+    """Suggest actual upcoming SportyBet fixtures involving either requested team."""
+    suggestions: list[tuple[int, str]] = []
+    seen: set[str] = set()
+
+    for fixture in fixtures:
+        home = str(fixture.get("home_team") or "")
+        away = str(fixture.get("away_team") or "")
+        if not home or not away:
+            continue
+
+        score = max(
+            _sportybet_team_match_score(team1, home),
+            _sportybet_team_match_score(team1, away),
+            _sportybet_team_match_score(team2, home),
+            _sportybet_team_match_score(team2, away),
+        )
+        if score < 70:
+            continue
+
+        label = f"{home} vs {away}"
+        if label in seen:
+            continue
+        seen.add(label)
+        suggestions.append((score, label))
+
+    suggestions.sort(key=lambda item: item[0], reverse=True)
+    return [label for _score, label in suggestions[:limit]]
+
+
 def _resolve_sportybet_fixture(
     fixtures: list[dict[str, Any]],
     team1: str,
@@ -2327,9 +2362,27 @@ def _resolve_sportybet_fixture(
             candidates.append((score, fixture))
 
     if not candidates:
-        raise ValueError(
-            f"I couldn't find an upcoming SportyBet fixture for {team1} vs {team2}."
+        suggestions = _sportybet_fixture_suggestions(
+            fixtures,
+            team1,
+            team2,
         )
+        message = (
+            f"I couldn't find an upcoming SportyBet fixture for "
+            f"{team1} vs {team2}."
+        )
+        if suggestions:
+            message += (
+                "\n\nUpcoming SportyBet fixtures involving those teams:"
+                + "".join(f"\n- {item}" for item in suggestions)
+                + "\n\nUse one of the actual fixtures above."
+            )
+        else:
+            message += (
+                "\nThe matchup may not be in SportyBet's current pre-match "
+                "catalogue yet. Use a fixture currently visible on SportyBet."
+            )
+        raise ValueError(message)
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     best_score = candidates[0][0]
