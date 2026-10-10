@@ -52,6 +52,9 @@ _MATCHUP_CONTEXT_LOCK = Lock()
 _SPORTYBET_ANALYSIS_CACHE: dict[str, dict[str, Any]] = {}
 _SPORTYBET_ANALYSIS_CACHE_LOCK = Lock()
 
+_SPORTYBET_SLIP_STATES: dict[str, dict[str, Any]] = {}
+_SPORTYBET_SLIP_STATE_LOCK = Lock()
+
 LEAGUE_CODES = {
     "premier league": "PL",
     "english premier league": "PL",
@@ -1981,6 +1984,11 @@ def _run_sportybet_booking_analysis(booking_code: str) -> dict[str, Any]:
         records.append(
             {
                 "index": index,
+                "source_index": index,
+                "event_id": str(selection.get("event_id") or ""),
+                "market_id": str(selection.get("market_id") or ""),
+                "specifier": selection.get("specifier"),
+                "outcome_id": str(selection.get("outcome_id") or ""),
                 "home_team": str(selection.get("home_team") or "Home"),
                 "away_team": str(selection.get("away_team") or "Away"),
                 "market_name": str(selection.get("market_name") or "Unknown market"),
@@ -2184,6 +2192,21 @@ def _format_sportybet_cached_view(
     return "\n".join(lines).strip()
 
 
+def _clone_sportybet_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [dict(record) for record in records]
+
+
+def _reindex_sportybet_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cloned = _clone_sportybet_records(records)
+    for index, record in enumerate(cloned, start=1):
+        record["index"] = index
+    return cloned
+
+
 def _cache_sportybet_analysis(user_id: str, analysis: dict[str, Any]) -> None:
     if not user_id:
         return
@@ -2198,13 +2221,798 @@ def _cached_sportybet_analysis(user_id: str) -> dict[str, Any] | None:
         return _SPORTYBET_ANALYSIS_CACHE.get(user_id)
 
 
+def _initialize_sportybet_working_slip(
+    user_id: str,
+    analysis: dict[str, Any],
+) -> None:
+    if not user_id:
+        return
+    current = _reindex_sportybet_records(
+        list(analysis.get("records") or [])
+    )
+    with _SPORTYBET_SLIP_STATE_LOCK:
+        _SPORTYBET_SLIP_STATES[user_id] = {
+            "source_code": str(analysis.get("code") or ""),
+            "current": current,
+            "undo": [],
+            "redo": [],
+        }
+
+
+def _sportybet_working_slip(user_id: str) -> dict[str, Any] | None:
+    if not user_id:
+        return None
+    with _SPORTYBET_SLIP_STATE_LOCK:
+        state = _SPORTYBET_SLIP_STATES.get(user_id)
+        if state is None:
+            return None
+        return {
+            "source_code": state.get("source_code", ""),
+            "current": _clone_sportybet_records(state.get("current") or []),
+            "undo": [
+                _clone_sportybet_records(snapshot)
+                for snapshot in (state.get("undo") or [])
+            ],
+            "redo": [
+                _clone_sportybet_records(snapshot)
+                for snapshot in (state.get("redo") or [])
+            ],
+        }
+
+
+def _replace_sportybet_working_slip(
+    user_id: str,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not user_id:
+        raise ValueError("No WhatsApp user context is available.")
+
+    updated = _reindex_sportybet_records(records)
+    with _SPORTYBET_SLIP_STATE_LOCK:
+        state = _SPORTYBET_SLIP_STATES.get(user_id)
+        if state is None:
+            raise ValueError(
+                "Load or analyse a SportyBet code first."
+            )
+        undo = state.setdefault("undo", [])
+        undo.append(
+            _clone_sportybet_records(state.get("current") or [])
+        )
+        if len(undo) > 20:
+            del undo[:-20]
+        state["current"] = updated
+        state["redo"] = []
+    return _clone_sportybet_records(updated)
+
+
+def _undo_sportybet_slip(user_id: str) -> str:
+    with _SPORTYBET_SLIP_STATE_LOCK:
+        state = _SPORTYBET_SLIP_STATES.get(user_id)
+        if state is None:
+            return "Load or analyse a SportyBet code first."
+        undo = state.get("undo") or []
+        if not undo:
+            return "There is nothing to undo on the current SportyBet slip."
+
+        current = _clone_sportybet_records(state.get("current") or [])
+        previous = undo.pop()
+        state.setdefault("redo", []).append(current)
+        state["current"] = _reindex_sportybet_records(previous)
+        count = len(state["current"])
+
+    return f"Undone. The working SportyBet slip now has {count} selections."
+
+
+def _redo_sportybet_slip(user_id: str) -> str:
+    with _SPORTYBET_SLIP_STATE_LOCK:
+        state = _SPORTYBET_SLIP_STATES.get(user_id)
+        if state is None:
+            return "Load or analyse a SportyBet code first."
+        redo = state.get("redo") or []
+        if not redo:
+            return "There is nothing to redo on the current SportyBet slip."
+
+        current = _clone_sportybet_records(state.get("current") or [])
+        next_state = redo.pop()
+        state.setdefault("undo", []).append(current)
+        state["current"] = _reindex_sportybet_records(next_state)
+        count = len(state["current"])
+
+    return f"Redone. The working SportyBet slip now has {count} selections."
+
+
+def _sportybet_record_rank_score(record: dict[str, Any]) -> tuple[int, float]:
+    model_probability = record.get("model_probability")
+    if isinstance(model_probability, (int, float)):
+        return 2, float(model_probability)
+
+    platform_probability = record.get("platform_probability")
+    if isinstance(platform_probability, (int, float)):
+        return 1, float(platform_probability)
+
+    odds = record.get("odds")
+    if isinstance(odds, (int, float)) and float(odds) > 1.0:
+        return 0, 1.0 / float(odds)
+
+    return 0, 0.0
+
+
+def _sportybet_record_confidence(record: dict[str, Any]) -> float:
+    tier, probability = _sportybet_record_rank_score(record)
+    if tier == 2:
+        return probability
+    if tier == 1:
+        return probability * 0.82
+    return probability * 0.70
+
+
+def _sportybet_combined_odds(
+    records: list[dict[str, Any]],
+) -> float | None:
+    odds = [
+        float(record["odds"])
+        for record in records
+        if isinstance(record.get("odds"), (int, float))
+        and float(record["odds"]) > 0
+    ]
+    if not records or len(odds) != len(records):
+        return None
+    return math.prod(odds)
+
+
+def _format_sportybet_working_slip(
+    user_id: str,
+    *,
+    detail_limit: int = 12,
+) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    records = state["current"]
+    modelled = sum(
+        1 for record in records
+        if record.get("model_probability") is not None
+    )
+    combined = _sportybet_combined_odds(records)
+
+    lines = [
+        f"Working SportyBet slip from: {state.get('source_code') or 'new slip'}",
+        f"Selections: {len(records)}",
+        f"Independently modelled: {modelled}",
+    ]
+    if combined is not None:
+        lines.append(f"Current combined odds snapshot: {combined:.2f}")
+
+    lines.append("")
+    for record in records[:detail_limit]:
+        support = record.get("model_probability")
+        support_text = (
+            f" | model {float(support) * 100:.1f}%"
+            if isinstance(support, (int, float))
+            else ""
+        )
+        odds = record.get("odds")
+        odds_text = (
+            f" @ {float(odds):.2f}"
+            if isinstance(odds, (int, float))
+            else ""
+        )
+        lines.append(
+            f"{record['index']}. {record['home_team']} vs "
+            f"{record['away_team']} - {record['outcome_name']}"
+            f"{odds_text}{support_text}"
+        )
+
+    if len(records) > detail_limit:
+        lines.append(f"...and {len(records) - detail_limit} more.")
+
+    lines.extend(
+        [
+            "",
+            "You can REMOVE numbers, KEEP TOP N, REMOVE UNMODELLED, "
+            "REMOVE LOWER SUPPORT, TARGET ODDS, UNDO, REDO, or CREATE NEW CODE.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _remove_sportybet_slip_indexes(
+    user_id: str,
+    indexes: list[int],
+) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    current = state["current"]
+    wanted = {int(index) for index in indexes if int(index) > 0}
+    valid = {int(record["index"]) for record in current}
+    missing = sorted(wanted - valid)
+    if missing:
+        return (
+            "Those selection numbers are not in the current slip: "
+            + ", ".join(str(item) for item in missing)
+        )
+
+    updated = [
+        record
+        for record in current
+        if int(record["index"]) not in wanted
+    ]
+    if not updated:
+        return "That would remove every selection. Keep at least one selection."
+
+    updated = _replace_sportybet_working_slip(user_id, updated)
+    return (
+        f"Removed {len(wanted)} selection(s). "
+        f"{len(updated)} remain.\n\n"
+        + _format_sportybet_working_slip(user_id, detail_limit=8)
+    )
+
+
+def _keep_top_sportybet_slip(
+    user_id: str,
+    count: int,
+) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    current = state["current"]
+    count = int(count)
+    if count < 1:
+        return "Keep at least one selection."
+    if count >= len(current):
+        return (
+            f"The current slip already has {len(current)} selections."
+        )
+
+    ranked = sorted(
+        current,
+        key=_sportybet_record_rank_score,
+        reverse=True,
+    )
+    selected_ids = {
+        int(record["index"])
+        for record in ranked[:count]
+    }
+    updated = [
+        record for record in current
+        if int(record["index"]) in selected_ids
+    ]
+    _replace_sportybet_working_slip(user_id, updated)
+    return (
+        f"Shortened the working slip to the strongest {count} selections "
+        "available from the current analysis.\n\n"
+        + _format_sportybet_working_slip(user_id, detail_limit=10)
+    )
+
+
+def _remove_unmodelled_sportybet_slip(user_id: str) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    current = state["current"]
+    updated = [
+        record for record in current
+        if record.get("model_probability") is not None
+    ]
+    if not updated:
+        return (
+            "None of the current selections has an independent model "
+            "comparison, so I left the slip unchanged."
+        )
+    if len(updated) == len(current):
+        return "Every current selection already has an independent model comparison."
+
+    removed = len(current) - len(updated)
+    _replace_sportybet_working_slip(user_id, updated)
+    return (
+        f"Removed {removed} unmodelled selection(s). "
+        f"{len(updated)} remain.\n\n"
+        + _format_sportybet_working_slip(user_id, detail_limit=10)
+    )
+
+
+def _remove_lower_support_sportybet_slip(user_id: str) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    current = state["current"]
+    updated = [
+        record
+        for record in current
+        if (
+            record.get("model_probability") is None
+            or float(record["model_probability"]) >= 0.50
+        )
+    ]
+    if len(updated) == len(current):
+        return "There are no lower-support modelled selections to remove."
+    if not updated:
+        return "That would remove every selection, so I left the slip unchanged."
+
+    removed = len(current) - len(updated)
+    _replace_sportybet_working_slip(user_id, updated)
+    return (
+        f"Removed {removed} lower-support selection(s). "
+        f"{len(updated)} remain.\n\n"
+        + _format_sportybet_working_slip(user_id, detail_limit=10)
+    )
+
+
+def _remove_lowest_sportybet_slip(
+    user_id: str,
+    count: int,
+) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    current = state["current"]
+    count = int(count)
+    if count < 1:
+        return "Remove at least one selection."
+    if count >= len(current):
+        return "That would remove every selection. Reduce the number."
+
+    ranked_low = sorted(
+        current,
+        key=_sportybet_record_rank_score,
+    )
+    remove_ids = {
+        int(record["index"])
+        for record in ranked_low[:count]
+    }
+    updated = [
+        record for record in current
+        if int(record["index"]) not in remove_ids
+    ]
+    _replace_sportybet_working_slip(user_id, updated)
+    return (
+        f"Removed the lowest-ranked {count} selection(s). "
+        f"{len(updated)} remain.\n\n"
+        + _format_sportybet_working_slip(user_id, detail_limit=10)
+    )
+
+
+def _select_records_for_target_odds(
+    records: list[dict[str, Any]],
+    target_odds: float,
+    *,
+    exact_count: int | None = None,
+) -> list[dict[str, Any]]:
+    if target_odds <= 1.0:
+        raise ValueError("Target combined odds must be above 1.00.")
+
+    usable = [
+        record
+        for record in records
+        if isinstance(record.get("odds"), (int, float))
+        and 1.01 <= float(record["odds"]) <= target_odds * 1.5
+    ]
+    if exact_count is not None:
+        exact_count = int(exact_count)
+        if exact_count < 1:
+            raise ValueError("Number of selections must be at least 1.")
+        if exact_count > len(usable):
+            raise ValueError(
+                f"Only {len(usable)} selections have usable odds."
+            )
+
+    # Beam search in log-odds space. This stays fast for large slips while
+    # balancing target closeness with independent/platform support.
+    target_log = math.log(target_odds)
+    states: list[tuple[float, float, tuple[int, ...]]] = [(0.0, 0.0, ())]
+
+    for index, record in enumerate(usable):
+        odd = float(record["odds"])
+        confidence = _sportybet_record_confidence(record)
+        additions: list[tuple[float, float, tuple[int, ...]]] = []
+        for log_sum, confidence_sum, chosen in states:
+            if exact_count is not None and len(chosen) >= exact_count:
+                continue
+            new_log = log_sum + math.log(odd)
+            if new_log > math.log(target_odds * 2.0):
+                continue
+            additions.append(
+                (
+                    new_log,
+                    confidence_sum + confidence,
+                    chosen + (index,),
+                )
+            )
+
+        states.extend(additions)
+        states.sort(
+            key=lambda state: (
+                abs(state[0] - target_log)
+                - 0.08
+                * (
+                    state[1] / max(1, len(state[2]))
+                ),
+                len(state[2]) == 0,
+            )
+        )
+        states = states[:3000]
+
+    candidates = [
+        state for state in states
+        if state[2]
+        and (
+            exact_count is None
+            or len(state[2]) == exact_count
+        )
+        and (
+            exact_count is not None
+            or len(state[2]) >= min(2, len(usable))
+        )
+    ]
+    if not candidates:
+        raise ValueError(
+            "I couldn't build a suitable subset for that target odds."
+        )
+
+    best = min(
+        candidates,
+        key=lambda state: (
+            abs(state[0] - target_log),
+            -state[1] / len(state[2]),
+            len(state[2]),
+        ),
+    )
+    return [usable[index] for index in best[2]]
+
+
+def _target_sportybet_slip_odds(
+    user_id: str,
+    target_odds: float,
+    *,
+    exact_count: int | None = None,
+) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    try:
+        selected = _select_records_for_target_odds(
+            state["current"],
+            float(target_odds),
+            exact_count=exact_count,
+        )
+    except ValueError as exc:
+        return str(exc)
+
+    _replace_sportybet_working_slip(user_id, selected)
+    combined = _sportybet_combined_odds(selected)
+    target_text = f"{float(target_odds):.2f}"
+    actual_text = (
+        f"{combined:.2f}" if combined is not None else "unavailable"
+    )
+    return (
+        f"Adjusted the working slip toward {target_text} combined odds. "
+        f"Current odds snapshot: {actual_text}.\n"
+        "Live odds can still move before a new share code is created.\n\n"
+        + _format_sportybet_working_slip(user_id, detail_limit=10)
+    )
+
+
+def _refresh_sportybet_slip_records(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not records:
+        return [], ["The working slip is empty."]
+
+    team_pairs = [
+        (
+            str(record.get("home_team") or ""),
+            str(record.get("away_team") or ""),
+        )
+        for record in records
+    ]
+    market_ids = tuple(
+        sorted(
+            {
+                str(record.get("market_id") or "")
+                for record in records
+                if str(record.get("market_id") or "")
+            }
+        )
+    )
+    fixtures = fetch_upcoming_fixtures(
+        team_pairs=team_pairs,
+        market_ids=market_ids,
+        max_pages=20,
+    )
+    by_event = {
+        str(fixture.get("event_id") or ""): fixture
+        for fixture in fixtures
+    }
+
+    refreshed: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for record in records:
+        event_id = str(record.get("event_id") or "")
+        fixture = by_event.get(event_id)
+        if fixture is None:
+            try:
+                fixture = _resolve_sportybet_fixture(
+                    fixtures,
+                    str(record.get("home_team") or ""),
+                    str(record.get("away_team") or ""),
+                )
+            except ValueError:
+                errors.append(
+                    f"{record.get('home_team')} vs {record.get('away_team')}: "
+                    "fixture is no longer available."
+                )
+                continue
+
+        market_id = str(record.get("market_id") or "")
+        specifier = record.get("specifier")
+        markets = [
+            market
+            for market in fixture.get("markets") or []
+            if str(market.get("market_id") or "") == market_id
+            and (
+                specifier is None
+                or str(market.get("specifier") or "") == str(specifier)
+            )
+            and int(market.get("status") or 0) == 0
+        ]
+        if not markets:
+            errors.append(
+                f"{fixture.get('home_team')} vs {fixture.get('away_team')}: "
+                "selected market is no longer available."
+            )
+            continue
+
+        market = markets[0]
+        outcome_id = str(record.get("outcome_id") or "")
+        outcome = next(
+            (
+                item
+                for item in market.get("outcomes") or []
+                if str(item.get("outcome_id") or "") == outcome_id
+                and item.get("is_active", False)
+            ),
+            None,
+        )
+        if outcome is None:
+            errors.append(
+                f"{fixture.get('home_team')} vs {fixture.get('away_team')}: "
+                "selected outcome is no longer available."
+            )
+            continue
+
+        refreshed.append(
+            {
+                **record,
+                "event_id": fixture.get("event_id"),
+                "home_team": fixture.get("home_team"),
+                "away_team": fixture.get("away_team"),
+                "market_id": market.get("market_id"),
+                "market_name": market.get("market_name"),
+                "specifier": market.get("specifier"),
+                "outcome_id": outcome.get("outcome_id"),
+                "outcome_name": outcome.get("outcome_name"),
+                "odds": outcome.get("odds"),
+            }
+        )
+
+    return refreshed, errors
+
+
+def _create_code_from_working_sportybet_slip(user_id: str) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    current = state["current"]
+    if len(current) > 20:
+        return (
+            f"The working slip has {len(current)} selections. "
+            "Shorten it to 20 or fewer before creating a new SportyBet code."
+        )
+
+    refreshed, errors = _refresh_sportybet_slip_records(current)
+    if errors:
+        preview = "\n".join(f"- {item}" for item in errors[:6])
+        more = (
+            f"\n- ...and {len(errors) - 6} more"
+            if len(errors) > 6
+            else ""
+        )
+        return (
+            "I didn't create a new code because some working selections "
+            "are no longer available on SportyBet:\n"
+            f"{preview}{more}\n\n"
+            "Remove or replace those selections and try again."
+        )
+
+    booking = create_booking(refreshed)
+    booked = booking.get("selections") or []
+    if booked and len(booked) != len(refreshed):
+        return (
+            "SportyBet returned a code with fewer selections than the working "
+            "slip, so I did not present it as a complete replacement. "
+            "Refresh the slip and try again."
+        )
+
+    combined = _sportybet_combined_odds(booked or refreshed)
+    lines = [
+        f"New SportyBet code: {booking.get('share_code')}",
+        f"Selections: {len(booked) or len(refreshed)}",
+    ]
+    if combined is not None:
+        lines.append(f"Combined odds: {combined:.2f}")
+
+    lines.append("")
+    for index, item in enumerate(booked or refreshed, start=1):
+        odds = item.get("odds")
+        odds_text = (
+            f" @ {float(odds):.2f}"
+            if isinstance(odds, (int, float))
+            else ""
+        )
+        lines.append(
+            f"{index}. {item.get('home_team')} vs {item.get('away_team')} - "
+            f"{item.get('market_name')}: {item.get('outcome_name')}{odds_text}"
+        )
+
+    share_url = str(booking.get("share_url") or "").strip()
+    if share_url:
+        lines.extend(["", f"Share URL: {share_url}"])
+
+    lines.extend(
+        [
+            "",
+            "The original code was not changed. This is a new share code built from the edited working slip.",
+            "No wager or stake was submitted.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _replace_sportybet_slip_with_safer_market(
+    user_id: str,
+    index: int,
+) -> str:
+    state = _sportybet_working_slip(user_id)
+    if state is None:
+        return "Load or analyse a SportyBet code first."
+
+    current = state["current"]
+    target = next(
+        (
+            record for record in current
+            if int(record.get("index") or 0) == int(index)
+        ),
+        None,
+    )
+    if target is None:
+        return f"Selection {index} is not in the current slip."
+
+    fixtures = fetch_upcoming_fixtures(
+        team_pairs=[
+            (
+                str(target.get("home_team") or ""),
+                str(target.get("away_team") or ""),
+            )
+        ],
+        market_ids=("1", "10", "18", "29"),
+        max_pages=20,
+    )
+    try:
+        fixture = _resolve_sportybet_fixture(
+            fixtures,
+            str(target.get("home_team") or ""),
+            str(target.get("away_team") or ""),
+        )
+    except ValueError as exc:
+        return str(exc)
+
+    try:
+        context = _build_prediction_context(
+            str(fixture.get("home_team") or ""),
+            str(fixture.get("away_team") or ""),
+            known_fixture={
+                "home": str(fixture.get("home_team") or ""),
+                "away": str(fixture.get("away_team") or ""),
+                "date": "",
+            },
+            recent_only=False,
+            prefer_season_only=True,
+        )
+    except Exception:
+        return (
+            "I couldn't get enough independent football data to find a "
+            "safer replacement for that selection."
+        )
+
+    candidates = _sportybet_auto_candidates_for_fixture(
+        fixture,
+        context,
+    )
+    candidates = [
+        candidate
+        for candidate in candidates
+        if not (
+            str(candidate.get("market_id") or "") == str(target.get("market_id") or "")
+            and str(candidate.get("specifier") or "") == str(target.get("specifier") or "")
+            and str(candidate.get("outcome_id") or "") == str(target.get("outcome_id") or "")
+        )
+    ]
+    if not candidates:
+        return (
+            "I couldn't find a different independently modelled market "
+            "that passes the current quality filters for that match."
+        )
+
+    replacement = candidates[0]
+    old_support = target.get("model_probability")
+    if (
+        isinstance(old_support, (int, float))
+        and float(replacement["model_probability"]) <= float(old_support)
+    ):
+        return (
+            f"I found alternatives for selection {index}, but none has "
+            "higher independent model support than the current pick, so I "
+            "left it unchanged."
+        )
+
+    replacement_record = {
+        **target,
+        **replacement,
+        "platform_probability": (
+            1.0 / float(replacement["odds"])
+            if isinstance(replacement.get("odds"), (int, float))
+            and float(replacement["odds"]) > 1.0
+            else None
+        ),
+        "platform_probability_label": "Raw odds-implied chance",
+        "model_probability": replacement["model_probability"],
+        "model_label": replacement["model_label"],
+        "alignment": _model_alignment(
+            float(replacement["model_probability"])
+        ),
+        "gap": None,
+        "model_reason": "modelled",
+    }
+
+    updated = []
+    for record in current:
+        if int(record["index"]) == int(index):
+            updated.append(replacement_record)
+        else:
+            updated.append(record)
+    _replace_sportybet_working_slip(user_id, updated)
+
+    return (
+        f"Replaced selection {index} with a higher-support available market:\n"
+        f"{replacement_record['home_team']} vs {replacement_record['away_team']} - "
+        f"{replacement_record['model_label']} @ {float(replacement_record['odds']):.2f}\n"
+        f"Independent model support: "
+        f"{float(replacement_record['model_probability']) * 100:.1f}%\n\n"
+        "Use UNDO if you want the previous selection back."
+    )
+
+
 def _analyse_and_cache_sportybet_booking_code(
     booking_code: str,
     user_id: str,
 ) -> str:
     analysis = _run_sportybet_booking_analysis(booking_code)
     _cache_sportybet_analysis(user_id, analysis)
-    return _format_sportybet_analysis_summary(analysis)
+    _initialize_sportybet_working_slip(user_id, analysis)
+    return (
+        _format_sportybet_analysis_summary(analysis)
+        + "\n\nWorking slip loaded. You can now shorten, remove, replace, undo, redo, or create a new code."
+    )
 
 
 @tool
