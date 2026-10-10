@@ -21,6 +21,7 @@ from twilio.rest import Client
 
 from betting_platforms import get_platform, platform_capability_summary, platform_market_name
 from rag import lookup_betting_term, search_knowledge
+from sportybet import SportyBetLookupError, extract_booking, fetch_booking, normalize_booking_code
 
 load_dotenv()
 
@@ -1552,6 +1553,236 @@ def format_prediction_for_platform(
         return f"I couldn't format that platform analysis right now: {exc}"
 
 
+def _specifier_number(text: str, key: str) -> float | None:
+    match = re.search(
+        rf"(?:^|[;,&\\s]){re.escape(key)}\\s*=\\s*([+-]?\\d+(?:\\.\\d+)?)",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _settlement_support(settlement: dict[str, float]) -> float:
+    return (
+        float(settlement.get("full_win", 0.0))
+        + 0.5 * float(settlement.get("half_win", 0.0))
+    )
+
+
+def _sportybet_selection_model_support(
+    context: dict[str, Any],
+    selection: dict[str, Any],
+) -> tuple[float | None, str]:
+    """Return model support for a normalized SportyBet selection."""
+    home, away, matrix = _fixture_order_projection(context)
+    market = str(selection.get("market_name") or "").casefold()
+    market_id = str(selection.get("market_id") or "")
+    outcome = str(selection.get("outcome_name") or "").casefold()
+    outcome_id = str(selection.get("outcome_id") or "")
+    specifier = str(selection.get("specifier") or "")
+
+    home_win = sum(p for h, a, p in matrix if h > a)
+    draw = sum(p for h, a, p in matrix if h == a)
+    away_win = sum(p for h, a, p in matrix if h < a)
+
+    if market_id == "1" or "1x2" in market or "match result" in market:
+        if outcome_id == "1" or "home" in outcome or outcome.strip() == "1":
+            return home_win, "1X2 home"
+        if outcome_id == "2" or "draw" in outcome or outcome.strip() == "x":
+            return draw, "1X2 draw"
+        if outcome_id == "3" or "away" in outcome or outcome.strip() == "2":
+            return away_win, "1X2 away"
+
+    if "double chance" in market or market_id == "10":
+        compact = re.sub(r"[^12x]", "", outcome)
+        if compact == "1x":
+            return home_win + draw, "Double Chance 1X"
+        if compact == "x2":
+            return draw + away_win, "Double Chance X2"
+        if compact == "12":
+            return home_win + away_win, "Double Chance 12"
+
+    if (
+        "both teams to score" in market
+        or "gg/ng" in market
+        or market_id == "29"
+    ):
+        yes = sum(p for h, a, p in matrix if h > 0 and a > 0)
+        is_yes = (
+            "yes" in outcome
+            or outcome.strip() == "gg"
+            or outcome_id.casefold() in {"yes", "gg"}
+        )
+        is_no = (
+            "no" in outcome
+            or outcome.strip() == "ng"
+            or outcome_id.casefold() in {"no", "ng"}
+        )
+        if is_yes:
+            return yes, "Both Teams to Score - Yes"
+        if is_no:
+            return 1.0 - yes, "Both Teams to Score - No"
+
+    if "draw no bet" in market or market_id == "11":
+        decisive = home_win + away_win
+        if decisive <= 0:
+            return None, "Draw No Bet"
+        if "home" in outcome or outcome.strip() == "1":
+            return home_win / decisive, "Draw No Bet - Home"
+        if "away" in outcome or outcome.strip() == "2":
+            return away_win / decisive, "Draw No Bet - Away"
+
+    if "over/under" in market or "total" in market or market_id == "18":
+        line = _specifier_number(specifier, "total")
+        if line is None:
+            joined = f"{market} {outcome}"
+            number = re.search(r"([0-9]+(?:\\.[0-9]+)?)", joined)
+            if number:
+                line = float(number.group(1))
+        side = None
+        if "over" in outcome or outcome_id == "12":
+            side = "over"
+        elif "under" in outcome or outcome_id == "13":
+            side = "under"
+        if line is not None and side:
+            settlement = _total_line_settlement(matrix, line, side=side)
+            return (
+                _settlement_support(settlement),
+                f"{side.title()} {line:g} Goals",
+            )
+
+    if "asian handicap" in market or market_id == "16":
+        home_line = _specifier_number(specifier, "hcp")
+        if home_line is not None:
+            if "home" in outcome or outcome.strip() == "1":
+                settlement = _asian_handicap_settlement(
+                    matrix,
+                    home_line,
+                    side="home",
+                )
+                return _settlement_support(settlement), f"{home} {home_line:+g}"
+            if "away" in outcome or outcome.strip() == "2":
+                away_line = -home_line
+                settlement = _asian_handicap_settlement(
+                    matrix,
+                    away_line,
+                    side="away",
+                )
+                return _settlement_support(settlement), f"{away} {away_line:+g}"
+
+    if "correct score" in market or market_id == "45":
+        score = re.search(r"(\\d+)\\s*[-:]\\s*(\\d+)", outcome)
+        if score:
+            wanted_home = int(score.group(1))
+            wanted_away = int(score.group(2))
+            probability = sum(
+                p
+                for h, a, p in matrix
+                if h == wanted_home and a == wanted_away
+            )
+            return probability, f"Correct Score {wanted_home}-{wanted_away}"
+
+    return None, str(selection.get("market_name") or "Unsupported market")
+
+
+def _model_alignment(probability: float) -> str:
+    if probability >= 0.65:
+        return "higher model support"
+    if probability >= 0.50:
+        return "moderate model support"
+    return "lower model support"
+
+
+@tool
+def analyse_sportybet_booking_code(booking_code: str) -> str:
+    """Read a SportyBet booking code and compare supported selections with the model."""
+    try:
+        clean = normalize_booking_code(booking_code)
+        payload = fetch_booking(clean)
+        booking = extract_booking(payload)
+        selections = booking.get("selections") or []
+        if not selections:
+            return (
+                f"SportyBet code {clean} loaded, but no readable selections were returned. "
+                "The code may be expired or the SportyBet response format may have changed."
+            )
+
+        lines = [
+            f"SportyBet code: {clean}",
+            f"Selections found: {len(selections)}",
+            "",
+        ]
+
+        counts = {"higher": 0, "moderate": 0, "lower": 0, "unmodelled": 0}
+
+        for index, selection in enumerate(selections, start=1):
+            home = str(selection.get("home_team") or "Home")
+            away = str(selection.get("away_team") or "Away")
+            market_name = str(selection.get("market_name") or "Unknown market")
+            outcome_name = str(selection.get("outcome_name") or "Unknown pick")
+            odds = selection.get("odds")
+
+            lines.append(f"{index}. {home} vs {away}")
+            lines.append(f"- Market: {market_name}")
+            lines.append(f"- Pick: {outcome_name}")
+            if isinstance(odds, (int, float)):
+                lines.append(f"- SportyBet odds: {odds:.2f}")
+
+            try:
+                context = _build_prediction_context(home, away)
+                if context.get("projection") is None:
+                    probability = None
+                    label = market_name
+                else:
+                    probability, label = _sportybet_selection_model_support(
+                        context,
+                        selection,
+                    )
+            except Exception:
+                probability = None
+                label = market_name
+
+            if probability is None:
+                counts["unmodelled"] += 1
+                lines.append("- Model comparison: not currently modelled")
+            else:
+                alignment = _model_alignment(probability)
+                if probability >= 0.65:
+                    counts["higher"] += 1
+                elif probability >= 0.50:
+                    counts["moderate"] += 1
+                else:
+                    counts["lower"] += 1
+                lines.append(
+                    f"- Model support: {probability * 100:.1f}% ({alignment})"
+                )
+                if label and label.casefold() != market_name.casefold():
+                    lines.append(f"- Interpreted as: {label}")
+            lines.append("")
+
+        lines.extend(
+            [
+                "Model comparison summary:",
+                f"- Higher support: {counts['higher']}",
+                f"- Moderate support: {counts['moderate']}",
+                f"- Lower support: {counts['lower']}",
+                f"- Not modelled: {counts['unmodelled']}",
+                "",
+                "This is an experimental read-only lookup of SportyBet's undocumented website endpoint. It does not place or submit a wager.",
+                "Model probabilities are estimates, not guaranteed outcomes or betting advice.",
+            ]
+        )
+        return "\n".join(lines)
+    except ValueError as exc:
+        return str(exc)
+    except SportyBetLookupError as exc:
+        return str(exc)
+    except Exception as exc:
+        return f"I couldn't analyse that SportyBet code right now: {exc}"
+
+
 @tool
 def search_betting_knowledge(question: str) -> str:
     """Explain football betting terms and market settlement using the local knowledge base."""
@@ -1696,6 +1927,7 @@ TOOLS = [
     predict_correct_score,
     predict_betting_markets,
     format_prediction_for_platform,
+    analyse_sportybet_booking_code,
     search_betting_knowledge,
     search_football_knowledge,
     get_league_fixtures,
@@ -1729,7 +1961,7 @@ Rules:
 4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
 5. Use the match prediction tool when the user asks who is likely to win, the correct-score projection tool for exact-score requests, and the betting-market probability tool for markets such as 1X2, double chance, draw no bet, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score.
 6. Use the betting terminology knowledge-base tool when the user asks what a betting term or market means, including Asian handicap, double chance, draw no bet, BTTS, over/under, accumulators, push/void, and similar terms.
-7. Use the betting-platform formatting tool when the user asks for predictions formatted for SportyBet, Bet9ja, BetKing, MSport, 1xBet, or Betway. Do not claim to place a wager or generate a booking code unless a documented programmatic booking-code integration is configured.
+7. Use the betting-platform formatting tool when the user asks for predictions formatted for SportyBet, Bet9ja, BetKing, MSport, 1xBet, or Betway. Use the SportyBet booking-code analysis tool when the user asks to load, check, review, or analyse an existing SportyBet code. The SportyBet lookup is experimental and read-only because it uses an undocumented website endpoint. Do not claim to place a wager or generate a booking code unless a supported integration is explicitly configured.
 8. Betting-market outputs are statistical probability estimates only. Never promise a guaranteed win, call a selection risk-free, or recommend a stake size or bankroll percentage.
 9. Keep WhatsApp responses concise, readable, and conversational.
 10. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
@@ -1817,6 +2049,31 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     """Route guarded factual intents directly to deterministic tools."""
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.casefold()
+
+    sportybet_code_match = re.search(
+        r"(?:analyse|analyze|check|review|load|get)\\s+(?:this\\s+)?"
+        r"(?:sportybet\\s+)?(?:booking\\s+|share\\s+)?code[:\\s]+([A-Z0-9]{4,12})\\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if sportybet_code_match and "sportybet" in lowered:
+        return str(
+            analyse_sportybet_booking_code.invoke(
+                {"booking_code": sportybet_code_match.group(1)}
+            )
+        )
+
+    sportybet_code_short = re.fullmatch(
+        r"(?:sportybet\\s+)?(?:booking\\s+|share\\s+)?code[:\\s]+([A-Z0-9]{4,12})[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if sportybet_code_short and "sportybet" in lowered:
+        return str(
+            analyse_sportybet_booking_code.invoke(
+                {"booking_code": sportybet_code_short.group(1)}
+            )
+        )
 
     rule_keywords = ("offside", "var", "yellow card", "red card", "penalty rule", "penalty kick")
     if any(keyword in lowered for keyword in rule_keywords):
