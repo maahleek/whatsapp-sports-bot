@@ -2284,7 +2284,7 @@ def _requires_current_tool_data(message: str) -> bool:
         "statistics", "predict", "prediction", "who will win",
         "betting prediction", "bet predictions", "betting markets",
         "btts", "both teams to score", "double chance", "draw no bet",
-        "asian handicap", "team total",
+        "asian handicap", "team total", "sportybet code", "booking code",
     )
     return any(keyword in lowered for keyword in keywords)
 
