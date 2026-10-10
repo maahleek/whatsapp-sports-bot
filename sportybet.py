@@ -151,6 +151,16 @@ def extract_booking(payload: dict[str, Any]) -> dict[str, Any]:
                 except (TypeError, ValueError):
                     odds = None
 
+                probability_raw = outcome.get("probability")
+                try:
+                    source_probability = (
+                        float(probability_raw)
+                        if probability_raw is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    source_probability = None
+
                 selections.append(
                     {
                         "event_id": event_id,
@@ -165,6 +175,7 @@ def extract_booking(payload: dict[str, Any]) -> dict[str, Any]:
                         "outcome_id": str(outcome.get("id") or "").strip(),
                         "outcome_name": str(outcome.get("desc") or "").strip(),
                         "odds": odds,
+                        "source_probability": source_probability,
                         "is_active": bool(outcome.get("isActive", 1)),
                     }
                 )
