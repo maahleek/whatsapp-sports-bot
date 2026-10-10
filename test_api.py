@@ -486,8 +486,8 @@ def _sample_sportybet_fixture_for_creation():
                 "specifier": "total=2.5",
                 "status": 0,
                 "outcomes": [
-                    {"outcome_id": "12", "outcome_name": "Over", "odds": 1.70, "is_active": True},
-                    {"outcome_id": "13", "outcome_name": "Under", "odds": 2.05, "is_active": True},
+                    {"outcome_id": "12", "outcome_name": "Over 2.5", "odds": 1.70, "is_active": True},
+                    {"outcome_id": "13", "outcome_name": "Under 2.5", "odds": 2.05, "is_active": True},
                 ],
             },
             {
@@ -570,6 +570,7 @@ def test_resolve_sportybet_over_under_for_creation():
     assert selection["market_id"] == "18"
     assert selection["specifier"] == "total=2.5"
     assert selection["outcome_id"] == "12"
+    assert selection["outcome_name"] == "Over 2.5"
 
 
 def test_resolve_sportybet_double_chance_for_creation():
