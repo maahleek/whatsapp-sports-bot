@@ -19,6 +19,7 @@ The assistant combines a large language model with tool calling, live sports API
 - Format model snapshots for SportyBet, Bet9ja, BetKing, MSport, 1xBet, and Betway
 - Load an existing SportyBet booking/share code through an experimental read-only integration and compare supported selections with the model
 - Return a compact booking-code summary by default and cache the detailed result for instant SHOW MODELLED, SHOW UNMODELLED, and SHOW ALL follow-ups
+- Create anonymous, non-staking SportyBet booking/share codes from explicit pre-match selections
 - Answer football-rules questions from a local RAG knowledge base
 - Remember conversation context per WhatsApp user
 
