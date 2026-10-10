@@ -16,6 +16,8 @@ The assistant combines a large language model with tool calling, live sports API
 - Produce fixture-aware match predictions and Poisson correct-score projections
 - Explain a broad football-betting glossary through RAG
 - Estimate common betting-market probabilities such as 1X2, double chance, DNB, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score
+- Format model snapshots for SportyBet, Bet9ja, BetKing, MSport, 1xBet, and Betway
+- Load an existing SportyBet booking/share code through an experimental read-only integration and compare supported selections with the model
 - Answer football-rules questions from a local RAG knowledge base
 - Remember conversation context per WhatsApp user
 
@@ -110,6 +112,18 @@ For matchups with usable scoring data, the Poisson score distribution is also co
 Markets such as corners, cards, player shots, player cards, goalscorer props, and other event-level props are explained by the knowledge base but are not predicted from goal data alone. They require dedicated historical data sources before the assistant can model them responsibly.
 
 The assistant does not provide guaranteed-win claims or stake-size recommendations. Market outputs are probability estimates only.
+
+
+## SportyBet booking-code analysis
+
+The assistant can load an existing SportyBet booking/share code and normalize its selections without logging in or handling account credentials. It then compares supported football selections with the same Poisson-based market model used elsewhere in the project.
+
+Supported model comparisons currently include common markets such as 1X2, double chance, draw no bet, BTTS, over/under totals, Asian handicap, and correct score when the returned market metadata is sufficient.
+
+This integration is intentionally read-only. It does not submit, confirm, stake, or place a wager.
+
+SportyBet does not expose a documented public developer API for this workflow. The project therefore treats booking lookup as experimental and isolated behind `sportybet.py`; it uses an undocumented website endpoint that may change without notice. Account identifiers returned by the upstream payload are deliberately not included in the normalized booking data.
+
 
 ## RAG knowledge base
 
@@ -217,6 +231,9 @@ Optional:
 - `TWILIO_WHATSAPP_FROM`
 - `VERIFY_TWILIO_SIGNATURE`
 - `SPORTSDB_API_KEY`
+- `SPORTYBET_API_BASE_URL`
+- `SPORTYBET_REGION`
+- `SPORTYBET_TIMEOUT_SECONDS`
 - `MEMORY_DB_PATH`
 - `MEMORY_NAMESPACE`
 - `HTTP_TIMEOUT_SECONDS`
@@ -241,6 +258,8 @@ This version includes:
 - Poisson-based win/draw/loss and correct-score projections
 - betting-market probability calculations derived from the same score distribution
 - RAG-based betting terminology explanations
+- read-only SportyBet booking-code lookup isolated behind a dedicated adapter
+- deliberate removal of upstream SportyBet account identifiers from normalized booking data
 
 ## Testing
 
@@ -260,6 +279,12 @@ A RAG smoke test is included:
 
 ```bash
 python test_rag.py
+```
+
+SportyBet parser tests are included and do not make live network requests:
+
+```bash
+python test_sportybet.py
 ```
 
 ## Portfolio positioning
