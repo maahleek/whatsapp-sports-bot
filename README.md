@@ -20,6 +20,7 @@ The assistant combines a large language model with tool calling, live sports API
 - Load an existing SportyBet booking/share code through an experimental read-only integration and compare supported selections with the model
 - Return a compact booking-code summary by default and cache the detailed result for instant SHOW MODELLED, SHOW UNMODELLED, and SHOW ALL follow-ups
 - Create anonymous, non-staking SportyBet booking/share codes from explicit pre-match selections
+- Build a model-ranked multi-match SportyBet share code from today's supported fixtures without placing a wager
 - Answer football-rules questions from a local RAG knowledge base
 - Remember conversation context per WhatsApp user
 
@@ -307,3 +308,16 @@ This project demonstrates:
 ## Disclaimer
 
 Match predictions, score projections, and betting-market probabilities are informational statistical estimates. They are not guarantees, stake recommendations, or financial advice.
+
+
+### Model-ranked SportyBet code
+
+The WhatsApp router also supports an explicit request such as:
+
+```text
+Build me a 3-match SportyBet code for today's games
+```
+
+The bot fetches today's current SportyBet pre-match catalogue, limits the scan to competitions supported by the independent football model, evaluates supported 1X2, Double Chance, BTTS, and full-match goal-total markets, keeps selections that meet the current model/odds quality filters, and prepares a non-staking SportyBet share code.
+
+This is an experimental model-ranking workflow, not a guarantee of results or profitability. It never submits a stake or places a wager.
