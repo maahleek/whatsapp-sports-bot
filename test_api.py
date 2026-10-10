@@ -11,6 +11,7 @@ from bot import (
     _score_projection,
     _sportybet_selection_model_support,
     _sportybet_context_has_enough_data,
+    _sportybet_platform_probability,
     _total_line_settlement,
     _remember_matchup,
     _last_matchup,
@@ -351,6 +352,22 @@ def test_sportybet_context_accepts_season_data():
     assert _sportybet_context_has_enough_data(context) is True
 
 
+def test_sportybet_platform_probability_prefers_feed_value():
+    probability, label = _sportybet_platform_probability(
+        {"source_probability": 0.72, "odds": 1.40}
+    )
+    assert probability == 0.72
+    assert label == "SportyBet feed probability"
+
+
+def test_sportybet_platform_probability_falls_back_to_odds():
+    probability, label = _sportybet_platform_probability(
+        {"source_probability": None, "odds": 2.0}
+    )
+    assert probability == 0.5
+    assert label == "Raw odds-implied chance"
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -387,6 +404,8 @@ if __name__ == "__main__":
     test_sportybet_team_total_is_modelled_as_team_goals()
     test_sportybet_context_rejects_tiny_recent_sample()
     test_sportybet_context_accepts_season_data()
+    test_sportybet_platform_probability_prefers_feed_value()
+    test_sportybet_platform_probability_falls_back_to_odds()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
