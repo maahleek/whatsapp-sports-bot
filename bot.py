@@ -2791,6 +2791,19 @@ def _target_sportybet_slip_odds(
     if state is None:
         return "Load or analyse a SportyBet code first."
 
+    current_combined = _sportybet_combined_odds(state["current"])
+    requested_target = float(target_odds)
+    if (
+        current_combined is not None
+        and current_combined < requested_target * 0.95
+    ):
+        return (
+            f"The current working slip is only about {current_combined:.2f} odds, "
+            f"so shortening it cannot raise it to {requested_target:.2f}.\n"
+            "Use UNDO, reload the original code, or ask for a fresh today's "
+            "code around that target."
+        )
+
     try:
         selected = _select_records_for_target_odds(
             state["current"],
@@ -3690,6 +3703,114 @@ def _sportybet_today_bounds_ms() -> tuple[int, int, str]:
     )
 
 
+def _select_fixture_candidates_for_target_odds(
+    fixture_candidates: list[list[dict[str, Any]]],
+    target_odds: float,
+    *,
+    exact_count: int | None = None,
+) -> list[dict[str, Any]]:
+    """Choose at most one market per fixture while approaching target odds."""
+    if target_odds <= 1.0:
+        raise ValueError("Target combined odds must be above 1.00.")
+
+    groups = [
+        [
+            candidate
+            for candidate in candidates[:8]
+            if isinstance(candidate.get("odds"), (int, float))
+            and float(candidate["odds"]) > 1.0
+        ]
+        for candidates in fixture_candidates
+        if candidates
+    ]
+    groups = [group for group in groups if group]
+    if not groups:
+        raise ValueError("No usable model-supported selections are available.")
+
+    if exact_count is not None:
+        exact_count = int(exact_count)
+        if exact_count < 1:
+            raise ValueError("Number of selections must be at least 1.")
+        if exact_count > len(groups):
+            raise ValueError(
+                f"Only {len(groups)} fixtures have usable model-supported selections."
+            )
+
+    target_log = math.log(target_odds)
+    max_count = exact_count if exact_count is not None else min(20, len(groups))
+    states: list[tuple[float, float, tuple[tuple[int, int], ...]]] = [
+        (0.0, 0.0, ())
+    ]
+
+    for group_index, group in enumerate(groups):
+        additions: list[tuple[float, float, tuple[tuple[int, int], ...]]] = []
+        for log_sum, support_sum, chosen in states:
+            if len(chosen) >= max_count:
+                continue
+            for candidate_index, candidate in enumerate(group):
+                odds = float(candidate["odds"])
+                support = float(candidate.get("model_probability") or 0.0)
+                new_log = log_sum + math.log(odds)
+                if new_log > math.log(target_odds * 1.75):
+                    continue
+                additions.append(
+                    (
+                        new_log,
+                        support_sum + support,
+                        chosen + ((group_index, candidate_index),),
+                    )
+                )
+
+        states.extend(additions)
+        states.sort(
+            key=lambda state: (
+                abs(state[0] - target_log),
+                -state[1] / max(1, len(state[2])),
+            )
+        )
+        states = states[:5000]
+
+    candidates = [
+        state
+        for state in states
+        if state[2]
+        and (
+            exact_count is None
+            or len(state[2]) == exact_count
+        )
+    ]
+    if not candidates:
+        raise ValueError("No combination passed the current quality filters.")
+
+    tolerance = math.log(1.10)
+    close = [
+        state
+        for state in candidates
+        if abs(state[0] - target_log) <= tolerance
+    ]
+    if close:
+        best = max(
+            close,
+            key=lambda state: (
+                state[1] / len(state[2]),
+                -abs(state[0] - target_log),
+            ),
+        )
+    else:
+        best = min(
+            candidates,
+            key=lambda state: (
+                abs(state[0] - target_log),
+                -state[1] / len(state[2]),
+            ),
+        )
+
+    return [
+        groups[group_index][candidate_index]
+        for group_index, candidate_index in best[2]
+    ]
+
+
 def _build_model_ranked_sportybet_code(
     match_count: int = 0,
     target_odds: float = 0.0,
@@ -3753,22 +3874,11 @@ def _build_model_ranked_sportybet_code(
     with ThreadPoolExecutor(max_workers=6) as executor:
         fixture_candidates = list(executor.map(evaluate, today))
 
-    pool: list[dict[str, Any]] = []
-    for candidates in fixture_candidates:
-        if candidates:
-            # One market per match prevents correlated duplicate legs from
-            # the same fixture in an automatically generated code.
-            pool.append(candidates[0])
-
-    pool.sort(
-        key=lambda item: (
-            float(item["model_probability"]),
-            float(item["odds"]),
-        ),
-        reverse=True,
-    )
-
-    if not pool:
+    usable_groups = [
+        candidates for candidates in fixture_candidates
+        if candidates
+    ]
+    if not usable_groups:
         return (
             f"I couldn't find independently modelled SportyBet selections "
             f"meeting the current quality filters for {date_text}."
@@ -3776,8 +3886,8 @@ def _build_model_ranked_sportybet_code(
 
     if requested_target is not None:
         try:
-            selected = _select_records_for_target_odds(
-                pool,
+            selected = _select_fixture_candidates_for_target_odds(
+                usable_groups,
                 requested_target,
                 exact_count=requested_count,
             )
@@ -3788,6 +3898,14 @@ def _build_model_ranked_sportybet_code(
             )
     else:
         count = requested_count or 3
+        pool = [candidates[0] for candidates in usable_groups]
+        pool.sort(
+            key=lambda item: (
+                float(item["model_probability"]),
+                float(item["odds"]),
+            ),
+            reverse=True,
+        )
         selected = pool[:count]
         if len(selected) < count:
             return (
@@ -3849,10 +3967,27 @@ def _build_model_ranked_sportybet_code(
         lines.extend(["", f"Share URL: {share_url}"])
 
     if requested_target is not None:
+        if combined is not None:
+            difference = abs(combined - requested_target)
+            if difference <= max(0.15, requested_target * 0.10):
+                target_note = (
+                    f"This is reasonably close to the requested "
+                    f"{requested_target:.2f} target."
+                )
+            else:
+                target_note = (
+                    f"The closest quality-filtered combination found was "
+                    f"{combined:.2f}, which is {difference:.2f} away from "
+                    f"the {requested_target:.2f} target."
+                )
+        else:
+            target_note = "Live odds can move, so the target is approximate."
+
         lines.extend(
             [
                 "",
-                "The target odds are approximate. The bot prioritizes stronger model-supported selections instead of forcing an exact total with a weaker pick.",
+                target_note,
+                "The bot does not force an exact total by adding a weaker selection.",
             ]
         )
 
