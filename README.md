@@ -352,6 +352,8 @@ The bot also accepts casual same-day code requests such as:
 Give me a sure code for today
 Give me a 5-game code for today
 Give me a random 5-game code for today
+Give me 5 games for today
+Give me 5 odds for today
 Give me a code around 5 odds for today
 Give me a 4-game code around 3 odds for today
 ```
