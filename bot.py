@@ -42,6 +42,9 @@ _MAX_PROCESSED_MESSAGE_SIDS = 1000
 _LAST_MATCHUPS: dict[str, tuple[str, str]] = {}
 _MATCHUP_CONTEXT_LOCK = Lock()
 
+_SPORTYBET_ANALYSIS_CACHE: dict[str, dict[str, Any]] = {}
+_SPORTYBET_ANALYSIS_CACHE_LOCK = Lock()
+
 LEAGUE_CODES = {
     "premier league": "PL",
     "english premier league": "PL",
@@ -1869,132 +1872,286 @@ def _model_alignment(probability: float) -> str:
     return "lower model support"
 
 
+def _run_sportybet_booking_analysis(booking_code: str) -> dict[str, Any]:
+    """Load and analyse a SportyBet booking code once, returning structured results."""
+    clean = normalize_booking_code(booking_code)
+    payload = fetch_booking(clean)
+    booking = extract_booking(payload)
+    selections = booking.get("selections") or []
+    if not selections:
+        raise SportyBetLookupError(
+            f"SportyBet code {clean} loaded, but no readable selections were returned. "
+            "The code may be expired or the SportyBet response format may have changed."
+        )
+
+    def evaluate_selection(selection: dict[str, Any]) -> dict[str, Any]:
+        market_name = str(selection.get("market_name") or "Unknown market")
+        if not _sportybet_market_can_model(selection):
+            return {"probability": None, "label": market_name}
+
+        home = str(selection.get("home_team") or "").strip()
+        away = str(selection.get("away_team") or "").strip()
+        if not home or not away:
+            return {"probability": None, "label": market_name}
+
+        try:
+            context = _build_prediction_context(
+                home,
+                away,
+                known_fixture={"home": home, "away": away, "date": ""},
+                recent_only=False,
+                prefer_season_only=True,
+            )
+            if (
+                context.get("projection") is None
+                or not _sportybet_context_has_enough_data(context)
+            ):
+                return {"probability": None, "label": market_name}
+
+            probability, label = _sportybet_selection_model_support(
+                context,
+                selection,
+            )
+            return {"probability": probability, "label": label}
+        except Exception:
+            return {"probability": None, "label": market_name}
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        evaluations = list(executor.map(evaluate_selection, selections))
+
+    records: list[dict[str, Any]] = []
+    counts = {"higher": 0, "moderate": 0, "lower": 0, "unmodelled": 0}
+
+    for index, (selection, evaluation) in enumerate(
+        zip(selections, evaluations),
+        start=1,
+    ):
+        platform_probability, platform_probability_label = (
+            _sportybet_platform_probability(selection)
+        )
+        model_probability = evaluation["probability"]
+        model_label = evaluation["label"]
+
+        alignment = None
+        gap = None
+        if model_probability is None:
+            counts["unmodelled"] += 1
+        else:
+            alignment = _model_alignment(model_probability)
+            if model_probability >= 0.65:
+                counts["higher"] += 1
+            elif model_probability >= 0.50:
+                counts["moderate"] += 1
+            else:
+                counts["lower"] += 1
+
+            if platform_probability is not None:
+                gap = (model_probability - platform_probability) * 100.0
+
+        records.append(
+            {
+                "index": index,
+                "home_team": str(selection.get("home_team") or "Home"),
+                "away_team": str(selection.get("away_team") or "Away"),
+                "market_name": str(selection.get("market_name") or "Unknown market"),
+                "outcome_name": str(selection.get("outcome_name") or "Unknown pick"),
+                "odds": selection.get("odds"),
+                "platform_probability": platform_probability,
+                "platform_probability_label": platform_probability_label,
+                "model_probability": model_probability,
+                "model_label": model_label,
+                "alignment": alignment,
+                "gap": gap,
+            }
+        )
+
+    return {
+        "code": clean,
+        "selection_count": len(records),
+        "records": records,
+        "counts": counts,
+    }
+
+
+def _format_sportybet_analysis_summary(analysis: dict[str, Any]) -> str:
+    """Format a compact default WhatsApp summary for a booking-code analysis."""
+    records = analysis["records"]
+    counts = analysis["counts"]
+    modelled = len(records) - int(counts["unmodelled"])
+
+    lines = [
+        f"SportyBet Code: {analysis['code']}",
+        f"{analysis['selection_count']} selections found",
+        "",
+        "Independent model coverage:",
+        f"- Modelled: {modelled}",
+        f"- Not independently modelled: {counts['unmodelled']}",
+        f"- Higher support: {counts['higher']}",
+        f"- Moderate support: {counts['moderate']}",
+        f"- Lower support: {counts['lower']}",
+    ]
+
+    disagreements = [
+        record
+        for record in records
+        if record.get("gap") is not None
+    ]
+    disagreements.sort(key=lambda item: abs(float(item["gap"])), reverse=True)
+
+    if disagreements:
+        lines.extend(["", "Biggest model vs platform differences:"])
+        for record in disagreements[:4]:
+            lines.append(
+                f"- {record['home_team']} vs {record['away_team']} | "
+                f"{record['outcome_name']} | "
+                f"platform {record['platform_probability'] * 100:.1f}% vs "
+                f"model {record['model_probability'] * 100:.1f}% "
+                f"({record['gap']:+.1f} pp)"
+            )
+
+    unmodelled_markets: list[str] = []
+    seen_markets: set[str] = set()
+    for record in records:
+        if record.get("model_probability") is not None:
+            continue
+        market = str(record.get("market_name") or "Unknown market")
+        key = market.casefold()
+        if key not in seen_markets:
+            seen_markets.add(key)
+            unmodelled_markets.append(market)
+
+    if unmodelled_markets:
+        preview = ", ".join(unmodelled_markets[:5])
+        if len(unmodelled_markets) > 5:
+            preview += f", +{len(unmodelled_markets) - 5} more"
+        lines.extend(["", f"Currently unmodelled markets: {preview}"])
+
+    lines.extend(
+        [
+            "",
+            "Reply:",
+            "- SHOW MODELLED",
+            "- SHOW UNMODELLED",
+            "- SHOW ALL",
+            "",
+            "The detailed result is cached, so these follow-ups do not rerun the full analysis.",
+            "Probabilities are estimates, not guaranteed outcomes or betting advice.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_sportybet_record(record: dict[str, Any]) -> str:
+    lines = [
+        f"{record['index']}. {record['home_team']} vs {record['away_team']}",
+        f"- Market: {record['market_name']}",
+        f"- Pick: {record['outcome_name']}",
+    ]
+
+    odds = record.get("odds")
+    if isinstance(odds, (int, float)):
+        lines.append(f"- SportyBet odds: {odds:.2f}")
+
+    platform_probability = record.get("platform_probability")
+    if platform_probability is not None:
+        lines.append(
+            f"- {record['platform_probability_label']}: "
+            f"{platform_probability * 100:.1f}%"
+        )
+
+    model_probability = record.get("model_probability")
+    if model_probability is None:
+        lines.append("- Independent model comparison: unavailable")
+    else:
+        lines.append(
+            f"- Independent model support: {model_probability * 100:.1f}% "
+            f"({record['alignment']})"
+        )
+        gap = record.get("gap")
+        if gap is not None:
+            lines.append(f"- Model vs platform gap: {gap:+.1f} percentage points")
+
+        model_label = str(record.get("model_label") or "")
+        market_name = str(record.get("market_name") or "")
+        if model_label and model_label.casefold() != market_name.casefold():
+            lines.append(f"- Interpreted as: {model_label}")
+
+    return "\n".join(lines)
+
+
+def _format_sportybet_cached_view(
+    analysis: dict[str, Any],
+    view: str,
+) -> str:
+    records = analysis["records"]
+    normalized_view = view.casefold().strip()
+
+    if normalized_view == "modelled":
+        selected = [
+            record
+            for record in records
+            if record.get("model_probability") is not None
+        ]
+        title = "Selections with independent model comparison"
+    elif normalized_view == "unmodelled":
+        selected = [
+            record
+            for record in records
+            if record.get("model_probability") is None
+        ]
+        title = "Selections without independent model comparison"
+    else:
+        selected = records
+        title = "All selections"
+
+    if not selected:
+        return (
+            f"SportyBet Code: {analysis['code']}\n"
+            f"{title}: none."
+        )
+
+    lines = [
+        f"SportyBet Code: {analysis['code']}",
+        f"{title}: {len(selected)}",
+        "",
+    ]
+    for record in selected:
+        lines.append(_format_sportybet_record(record))
+        lines.append("")
+
+    lines.append("Loaded from the cached analysis; no full re-analysis was run.")
+    return "\n".join(lines).strip()
+
+
+def _cache_sportybet_analysis(user_id: str, analysis: dict[str, Any]) -> None:
+    if not user_id:
+        return
+    with _SPORTYBET_ANALYSIS_CACHE_LOCK:
+        _SPORTYBET_ANALYSIS_CACHE[user_id] = analysis
+
+
+def _cached_sportybet_analysis(user_id: str) -> dict[str, Any] | None:
+    if not user_id:
+        return None
+    with _SPORTYBET_ANALYSIS_CACHE_LOCK:
+        return _SPORTYBET_ANALYSIS_CACHE.get(user_id)
+
+
+def _analyse_and_cache_sportybet_booking_code(
+    booking_code: str,
+    user_id: str,
+) -> str:
+    analysis = _run_sportybet_booking_analysis(booking_code)
+    _cache_sportybet_analysis(user_id, analysis)
+    return _format_sportybet_analysis_summary(analysis)
+
+
 @tool
 def analyse_sportybet_booking_code(booking_code: str) -> str:
-    """Read a SportyBet booking code and compare supported selections with the model."""
+    """Read a SportyBet booking code and return a compact model-comparison summary."""
     try:
-        clean = normalize_booking_code(booking_code)
-        payload = fetch_booking(clean)
-        booking = extract_booking(payload)
-        selections = booking.get("selections") or []
-        if not selections:
-            return (
-                f"SportyBet code {clean} loaded, but no readable selections were returned. "
-                "The code may be expired or the SportyBet response format may have changed."
-            )
-
-        lines = [
-            f"SportyBet code: {clean}",
-            f"Selections found: {len(selections)}",
-            "",
-        ]
-
-        counts = {"higher": 0, "moderate": 0, "lower": 0, "unmodelled": 0}
-
-        def evaluate_selection(selection: dict[str, Any]) -> dict[str, Any]:
-            market_name = str(selection.get("market_name") or "Unknown market")
-            if not _sportybet_market_can_model(selection):
-                return {"probability": None, "label": market_name}
-
-            home = str(selection.get("home_team") or "").strip()
-            away = str(selection.get("away_team") or "").strip()
-            if not home or not away:
-                return {"probability": None, "label": market_name}
-
-            try:
-                # SportyBet already tells us the real home/away order, so avoid
-                # fixture-discovery calls. For major supported leagues, cached
-                # season standings are used without an extra recent-form call;
-                # other leagues fall back to recent form.
-                context = _build_prediction_context(
-                    home,
-                    away,
-                    known_fixture={"home": home, "away": away, "date": ""},
-                    recent_only=False,
-                    prefer_season_only=True,
-                )
-                if (
-                    context.get("projection") is None
-                    or not _sportybet_context_has_enough_data(context)
-                ):
-                    return {"probability": None, "label": market_name}
-
-                probability, label = _sportybet_selection_model_support(
-                    context,
-                    selection,
-                )
-                return {"probability": probability, "label": label}
-            except Exception:
-                return {"probability": None, "label": market_name}
-
-        # Network-bound team lookups are independent. A small worker pool
-        # dramatically reduces large-slip latency without flooding providers.
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            evaluations = list(executor.map(evaluate_selection, selections))
-
-        for index, selection in enumerate(selections, start=1):
-            home = str(selection.get("home_team") or "Home")
-            away = str(selection.get("away_team") or "Away")
-            market_name = str(selection.get("market_name") or "Unknown market")
-            outcome_name = str(selection.get("outcome_name") or "Unknown pick")
-            odds = selection.get("odds")
-
-            lines.append(f"{index}. {home} vs {away}")
-            lines.append(f"- Market: {market_name}")
-            lines.append(f"- Pick: {outcome_name}")
-            if isinstance(odds, (int, float)):
-                lines.append(f"- SportyBet odds: {odds:.2f}")
-
-            platform_probability, platform_probability_label = (
-                _sportybet_platform_probability(selection)
-            )
-            if platform_probability is not None:
-                lines.append(
-                    f"- {platform_probability_label}: "
-                    f"{platform_probability * 100:.1f}%"
-                )
-
-            evaluation = evaluations[index - 1]
-            probability = evaluation["probability"]
-            label = evaluation["label"]
-
-            if probability is None:
-                counts["unmodelled"] += 1
-                lines.append("- Model comparison: not currently modelled")
-            else:
-                alignment = _model_alignment(probability)
-                if probability >= 0.65:
-                    counts["higher"] += 1
-                elif probability >= 0.50:
-                    counts["moderate"] += 1
-                else:
-                    counts["lower"] += 1
-                lines.append(
-                    f"- Independent model support: {probability * 100:.1f}% ({alignment})"
-                )
-                if platform_probability is not None:
-                    gap = (probability - platform_probability) * 100.0
-                    lines.append(
-                        f"- Model vs platform gap: {gap:+.1f} percentage points"
-                    )
-                if label and label.casefold() != market_name.casefold():
-                    lines.append(f"- Interpreted as: {label}")
-            lines.append("")
-
-        lines.extend(
-            [
-                "Independent model comparison summary:",
-                f"- Higher support: {counts['higher']}",
-                f"- Moderate support: {counts['moderate']}",
-                f"- Lower support: {counts['lower']}",
-                f"- Independent model unavailable: {counts['unmodelled']}",
-                "",
-                "Every readable leg can still show SportyBet/provider probability metadata or raw odds-implied chance. Independent model comparisons are only shown when enough separate football data is available.",
-                "This is an experimental read-only lookup of SportyBet's undocumented website endpoint. It does not place or submit a wager.",
-                "Model probabilities are estimates, not guaranteed outcomes or betting advice.",
-            ]
-        )
-        return "\n".join(lines)
+        analysis = _run_sportybet_booking_analysis(booking_code)
+        return _format_sportybet_analysis_summary(analysis)
     except ValueError as exc:
         return str(exc)
     except SportyBetLookupError as exc:
@@ -2270,6 +2427,32 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.casefold()
 
+    cached_analysis = _cached_sportybet_analysis(user_id)
+    cached_view_match = re.fullmatch(
+        r"(?:show|list)(?:\s+me)?\s+(all|modelled|modeled|unmodelled|unmodeled)"
+        r"(?:\s+(?:selections|picks|legs))?[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if cached_view_match:
+        if cached_analysis is None:
+            return "Analyse a SportyBet code first, then I can show the cached selections."
+        requested_view = cached_view_match.group(1).casefold()
+        if requested_view == "modeled":
+            requested_view = "modelled"
+        elif requested_view == "unmodeled":
+            requested_view = "unmodelled"
+        return _format_sportybet_cached_view(cached_analysis, requested_view)
+
+    if re.fullmatch(
+        r"(?:show|repeat)(?:\s+the)?\s+(?:sportybet\s+)?summary[?.!]?",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        if cached_analysis is None:
+            return "Analyse a SportyBet code first, then I can show the cached summary."
+        return _format_sportybet_analysis_summary(cached_analysis)
+
     sportybet_code_match = re.search(
         r"(?:analyse|analyze|check|review|load|get)\s+(?:this\s+)?"
         r"(?:sportybet\s+)?(?:booking\s+|share\s+)?code[:\s]+([A-Z0-9]{4,12})\b",
@@ -2277,11 +2460,17 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
         flags=re.IGNORECASE,
     )
     if sportybet_code_match and "sportybet" in lowered:
-        return str(
-            analyse_sportybet_booking_code.invoke(
-                {"booking_code": sportybet_code_match.group(1)}
+        try:
+            return _analyse_and_cache_sportybet_booking_code(
+                sportybet_code_match.group(1),
+                user_id,
             )
-        )
+        except ValueError as exc:
+            return str(exc)
+        except SportyBetLookupError as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"I couldn't analyse that SportyBet code right now: {exc}"
 
     sportybet_code_short = re.fullmatch(
         r"(?:sportybet\s+)?(?:booking\s+|share\s+)?code[:\s]+([A-Z0-9]{4,12})[?.!]?",
@@ -2289,11 +2478,17 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
         flags=re.IGNORECASE,
     )
     if sportybet_code_short and "sportybet" in lowered:
-        return str(
-            analyse_sportybet_booking_code.invoke(
-                {"booking_code": sportybet_code_short.group(1)}
+        try:
+            return _analyse_and_cache_sportybet_booking_code(
+                sportybet_code_short.group(1),
+                user_id,
             )
-        )
+        except ValueError as exc:
+            return str(exc)
+        except SportyBetLookupError as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"I couldn't analyse that SportyBet code right now: {exc}"
 
     rule_keywords = ("offside", "var", "yellow card", "red card", "penalty rule", "penalty kick")
     if any(keyword in lowered for keyword in rule_keywords):
