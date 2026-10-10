@@ -1846,6 +1846,21 @@ def _sportybet_context_has_enough_data(context: dict[str, Any]) -> bool:
     return True
 
 
+def _sportybet_platform_probability(
+    selection: dict[str, Any],
+) -> tuple[float | None, str]:
+    """Return SportyBet/provider probability metadata without treating it as our model."""
+    source_probability = selection.get("source_probability")
+    if isinstance(source_probability, (int, float)) and 0.0 <= source_probability <= 1.0:
+        return float(source_probability), "SportyBet feed probability"
+
+    odds = selection.get("odds")
+    if isinstance(odds, (int, float)) and odds > 1.0:
+        return min(1.0, 1.0 / float(odds)), "Raw odds-implied chance"
+
+    return None, ""
+
+
 def _model_alignment(probability: float) -> str:
     if probability >= 0.65:
         return "higher model support"
@@ -1930,6 +1945,15 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
             if isinstance(odds, (int, float)):
                 lines.append(f"- SportyBet odds: {odds:.2f}")
 
+            platform_probability, platform_probability_label = (
+                _sportybet_platform_probability(selection)
+            )
+            if platform_probability is not None:
+                lines.append(
+                    f"- {platform_probability_label}: "
+                    f"{platform_probability * 100:.1f}%"
+                )
+
             evaluation = evaluations[index - 1]
             probability = evaluation["probability"]
             label = evaluation["label"]
@@ -1946,21 +1970,26 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
                 else:
                     counts["lower"] += 1
                 lines.append(
-                    f"- Model support: {probability * 100:.1f}% ({alignment})"
+                    f"- Independent model support: {probability * 100:.1f}% ({alignment})"
                 )
+                if platform_probability is not None:
+                    gap = (probability - platform_probability) * 100.0
+                    lines.append(
+                        f"- Model vs platform gap: {gap:+.1f} percentage points"
+                    )
                 if label and label.casefold() != market_name.casefold():
                     lines.append(f"- Interpreted as: {label}")
             lines.append("")
 
         lines.extend(
             [
-                "Model comparison summary:",
+                "Independent model comparison summary:",
                 f"- Higher support: {counts['higher']}",
                 f"- Moderate support: {counts['moderate']}",
                 f"- Lower support: {counts['lower']}",
-                f"- Not modelled: {counts['unmodelled']}",
+                f"- Independent model unavailable: {counts['unmodelled']}",
                 "",
-                "Large slips use cached season data when available and recent-form fallback elsewhere. Comparisons are withheld when the available sample is too small.",
+                "Every readable leg can still show SportyBet/provider probability metadata or raw odds-implied chance. Independent model comparisons are only shown when enough separate football data is available.",
                 "This is an experimental read-only lookup of SportyBet's undocumented website endpoint. It does not place or submit a wager.",
                 "Model probabilities are estimates, not guaranteed outcomes or betting advice.",
             ]
