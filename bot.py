@@ -1482,6 +1482,39 @@ def predict_betting_markets(team1: str, team2: str, market: str = "all") -> str:
 
 
 @tool
+def format_prediction_for_platform(
+    team1: str,
+    team2: str,
+    platform: str,
+) -> str:
+    """Format modelled football markets for a supported betting platform without placing a wager."""
+    try:
+        adapter = get_platform(platform)
+        if adapter is None:
+            return (
+                "That betting platform is not configured yet. "
+                "Supported platforms: SportyBet, Bet9ja, BetKing, MSport, 1xBet, and Betway."
+            )
+
+        context = _build_prediction_context(team1, team2)
+        if context.get("projection") is None:
+            return (
+                f"I can identify {adapter.display_name}, but I do not have enough scoring data "
+                f"to build market probabilities for {team1} vs {team2}."
+            )
+
+        report = _betting_market_report(context, "all")
+        return (
+            f"Platform: {adapter.display_name}\n\n"
+            + report
+            + "\n\n"
+            + platform_capability_summary(adapter)
+        )
+    except Exception as exc:
+        return f"I couldn't format that platform analysis right now: {exc}"
+
+
+@tool
 def search_betting_knowledge(question: str) -> str:
     """Explain football betting terms and market settlement using the local knowledge base."""
     try:
@@ -1624,6 +1657,7 @@ TOOLS = [
     predict_match,
     predict_correct_score,
     predict_betting_markets,
+    format_prediction_for_platform,
     search_betting_knowledge,
     search_football_knowledge,
     get_league_fixtures,
@@ -1657,14 +1691,15 @@ Rules:
 4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
 5. Use the match prediction tool when the user asks who is likely to win, the correct-score projection tool for exact-score requests, and the betting-market probability tool for markets such as 1X2, double chance, draw no bet, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score.
 6. Use the betting terminology knowledge-base tool when the user asks what a betting term or market means, including Asian handicap, double chance, draw no bet, BTTS, over/under, accumulators, push/void, and similar terms.
-7. Betting-market outputs are statistical probability estimates only. Never promise a guaranteed win, call a selection risk-free, or recommend a stake size or bankroll percentage.
-8. Keep WhatsApp responses concise, readable, and conversational.
-9. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
-10. Never invent, infer, reconstruct, or embellish statistics that were not returned by a tool in the current turn. Do not add xG, shot counts, possession, table positions, points, goals, or other metrics unless a current-turn tool explicitly returned them.
-11. Never reuse numeric sports data from conversation memory as if it were current. For standings, results, fixtures, form, injuries, scorers, or stats, current-turn tool output is the only authoritative source.
-12. If a standings tool says the structured table is unavailable, do not build a partial table from web snippets and do not fill missing rows with guesses or dashes.
-13. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on. Do not describe one or two matches as proof of "good form", "bad form", title contention, or another broad conclusion.
-14. If a tool reports that data is unavailable, say so rather than inventing an answer.
+7. Use the betting-platform formatting tool when the user asks for predictions formatted for SportyBet, Bet9ja, BetKing, MSport, 1xBet, or Betway. Do not claim to place a wager or generate a booking code unless a documented programmatic booking-code integration is configured.
+8. Betting-market outputs are statistical probability estimates only. Never promise a guaranteed win, call a selection risk-free, or recommend a stake size or bankroll percentage.
+9. Keep WhatsApp responses concise, readable, and conversational.
+10. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
+11. Never invent, infer, reconstruct, or embellish statistics that were not returned by a tool in the current turn. Do not add xG, shot counts, possession, table positions, points, goals, or other metrics unless a current-turn tool explicitly returned them.
+12. Never reuse numeric sports data from conversation memory as if it were current. For standings, results, fixtures, form, injuries, scorers, or stats, current-turn tool output is the only authoritative source.
+13. If a standings tool says the structured table is unavailable, do not build a partial table from web snippets and do not fill missing rows with guesses or dashes.
+14. When a data provider returns fewer than five recent matches, clearly say how many matches the summary is based on. Do not describe one or two matches as proof of "good form", "bad form", title contention, or another broad conclusion.
+15. If a tool reports that data is unavailable, say so rather than inventing an answer.
 """.strip()
 
     return create_react_agent(
