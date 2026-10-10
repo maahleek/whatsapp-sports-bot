@@ -19,6 +19,7 @@ from tavily import TavilyClient
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 
+from betting_platforms import get_platform, platform_capability_summary
 from rag import lookup_betting_term, search_knowledge
 
 load_dotenv()
@@ -714,37 +715,6 @@ def _betting_market_report(context: dict[str, Any], market_request: str = "all")
                 f"- 1X ({home} or Draw): {(home_win + draw) * 100:.1f}%",
                 f"- X2 (Draw or {away}): {(draw + away_win) * 100:.1f}%",
                 f"- 12 ({home} or {away}): {(home_win + away_win) * 100:.1f}%",
-                "",
-            ]
-        )
-
-        if "double chance" in request and not wants_all:
-            lines.append("Double chance:")
-
-        if "1x" in request:
-            lines.append(f"- 1X: {(home_win + draw) * 100:.1f}%")
-        elif "x2" in request:
-            lines.append(f"- X2: {(draw + away_win) * 100:.1f}%")
-        elif re.search(r"\b12\b", request):
-            lines.append(f"- 12: {(home_win + away_win) * 100:.1f}%")
-        else:
-            lines.extend(
-                [
-                    f"- 1X: {(home_win + draw) * 100:.1f}%",
-                    f"- X2: {(draw + away_win) * 100:.1f}%",
-                    f"- 12: {(home_win + away_win) * 100:.1f}%",
-                ]
-            )
-
-        lines.append("")
-
-    elif wants_all:
-        lines.extend(
-            [
-                "Double chance:",
-                f"- 1X: {(home_win + draw) * 100:.1f}%",
-                f"- X2: {(draw + away_win) * 100:.1f}%",
-                f"- 12: {(home_win + away_win) * 100:.1f}%",
                 "",
             ]
         )
