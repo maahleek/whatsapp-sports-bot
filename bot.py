@@ -2562,6 +2562,19 @@ def _send_whatsapp_message(to: str, body: str) -> None:
 
 
 def process_and_reply(message: str, sender: str) -> None:
+    if (
+        "sportybet" in message.casefold()
+        and "code" in message.casefold()
+        and any(word in message.casefold() for word in ("analyse", "analyze", "check", "review", "load"))
+    ):
+        try:
+            _send_whatsapp_message(
+                sender,
+                "SportyBet code received. I’m checking the slip and comparing the markets now.",
+            )
+        except Exception as exc:
+            print(f"Twilio acknowledgement error for {sender}: {exc}")
+
     try:
         response = ask_agent(message, sender)
     except Exception as exc:
