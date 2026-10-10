@@ -9,6 +9,7 @@ from bot import (
     _concise_platform_prediction_report,
     _extract_player_records,
     _normalize_team_name,
+    _league_code,
     _prediction_probabilities,
     _prediction_strength,
     _score_projection,
@@ -58,6 +59,13 @@ def test_nested_player_search_shape():
     players = _extract_player_records(payload)
     assert len(players) == 2
     assert players[0]["name"] == "Erling Haaland"
+
+
+def test_structured_league_aliases():
+    assert _league_code("Championship") == "ELC"
+    assert _league_code("Eredivisie") == "DED"
+    assert _league_code("Liga Portugal") == "PPL"
+    assert _league_code("Brazil Serie A") == "BSA"
 
 
 def test_team_name_normalization():
@@ -886,6 +894,7 @@ if __name__ == "__main__":
     test_prediction_probabilities_sum_to_one()
     test_nested_player_search_shape()
     test_team_name_normalization()
+    test_structured_league_aliases()
     test_prediction_strength_can_use_season_with_small_recent_sample()
     test_poisson_score_projection_is_normalized()
     test_matchup_context_for_followups()
