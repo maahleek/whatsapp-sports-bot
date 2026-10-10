@@ -13,6 +13,8 @@ from bot import (
     _prediction_probabilities,
     _prediction_strength,
     _score_projection,
+    _standing_team_match_score,
+    _season_summary_from_table,
     _sportybet_selection_model_support,
     _sportybet_context_has_enough_data,
     _sportybet_platform_probability,
@@ -71,6 +73,35 @@ def test_structured_league_aliases():
 def test_team_name_normalization():
     assert _normalize_team_name("Arsenal FC") == "arsenal"
     assert _normalize_team_name("Liverpool F.C.") == "liverpool"
+
+
+def test_standing_team_match_tolerates_provider_name_variants():
+    assert _standing_team_match_score("FC Twente Enschede", "FC Twente") >= 80
+    assert _standing_team_match_score("Bournemouth", "AFC Bournemouth") >= 80
+    assert _standing_team_match_score("Arsenal", "Chelsea") == 0
+
+
+def test_season_summary_can_use_fixture_league_table_directly():
+    table = [
+        {
+            "position": 4,
+            "team": {"name": "FC Twente"},
+            "playedGames": 8,
+            "points": 16,
+            "goalsFor": 18,
+            "goalsAgainst": 10,
+            "goalDifference": 8,
+        }
+    ]
+    summary = _season_summary_from_table(
+        "FC Twente Enschede",
+        "Eredivisie",
+        table,
+    )
+    assert summary is not None
+    assert summary["team"] == "FC Twente"
+    assert summary["played"] == 8
+    assert summary["points_per_game"] == 2.0
 
 
 def test_prediction_strength_can_use_season_with_small_recent_sample():
@@ -895,6 +926,8 @@ if __name__ == "__main__":
     test_nested_player_search_shape()
     test_team_name_normalization()
     test_structured_league_aliases()
+    test_standing_team_match_tolerates_provider_name_variants()
+    test_season_summary_can_use_fixture_league_table_directly()
     test_prediction_strength_can_use_season_with_small_recent_sample()
     test_poisson_score_projection_is_normalized()
     test_matchup_context_for_followups()
