@@ -9,6 +9,7 @@ from bot import (
     _prediction_probabilities,
     _prediction_strength,
     _score_projection,
+    _sportybet_selection_model_support,
     _total_line_settlement,
     _remember_matchup,
     _last_matchup,
@@ -185,6 +186,64 @@ def test_platform_prediction_report_is_whatsapp_concise():
     assert len(report) < 1500
 
 
+def test_sportybet_selection_model_support_for_1x2():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    probability, label = _sportybet_selection_model_support(
+        context,
+        {
+            "market_id": "1",
+            "market_name": "1X2",
+            "outcome_id": "1",
+            "outcome_name": "Home",
+            "specifier": "",
+        },
+    )
+    assert probability is not None
+    assert 0.0 <= probability <= 1.0
+    assert label == "1X2 home"
+
+
+def test_sportybet_selection_model_support_for_total():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    probability, label = _sportybet_selection_model_support(
+        context,
+        {
+            "market_id": "18",
+            "market_name": "Over/Under",
+            "outcome_id": "12",
+            "outcome_name": "Over",
+            "specifier": "total=2.5",
+        },
+    )
+    assert probability is not None
+    assert 0.0 <= probability <= 1.0
+    assert label == "Over 2.5 Goals"
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -213,6 +272,8 @@ if __name__ == "__main__":
     test_specific_total_line_settlement_is_normalized()
     test_specific_total_request_is_concise()
     test_platform_prediction_report_is_whatsapp_concise()
+    test_sportybet_selection_model_support_for_1x2()
+    test_sportybet_selection_model_support_for_total()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
