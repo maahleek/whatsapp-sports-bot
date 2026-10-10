@@ -1,3 +1,4 @@
+from betting_platforms import get_platform, normalize_platform_name, platform_capability_summary
 from bot import (
     _asian_handicap_probabilities,
     _asian_handicap_settlement,
@@ -161,6 +162,21 @@ def test_specific_total_request_is_concise():
     assert "Over 3.5" not in report
 
 
+def test_betting_platform_aliases():
+    assert normalize_platform_name("SportyBet") == "sportybet"
+    assert normalize_platform_name("sporty bet") == "sportybet"
+    assert normalize_platform_name("Bet9ja") == "bet9ja"
+    assert normalize_platform_name("1xBet") == "1xbet"
+
+
+def test_platform_capability_is_honest_about_booking_codes():
+    platform = get_platform("SportyBet")
+    assert platform is not None
+    summary = platform_capability_summary(platform)
+    assert "supports booking/share codes" in summary
+    assert "no public programmatic booking-code API is configured" in summary
+
+
 if __name__ == "__main__":
     test_prediction_probabilities_sum_to_one()
     test_nested_player_search_shape()
@@ -173,4 +189,6 @@ if __name__ == "__main__":
     test_quarter_asian_handicap_settlement_is_normalized()
     test_specific_total_line_settlement_is_normalized()
     test_specific_total_request_is_concise()
+    test_betting_platform_aliases()
+    test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
