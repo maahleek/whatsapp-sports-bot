@@ -12,6 +12,8 @@ class BettingPlatform:
     market_names: dict[str, str]
     supports_booking_codes: bool
     programmatic_booking_code_api: bool = False
+    booking_code_lookup: bool = False
+    booking_code_lookup_note: str = ""
 
 
 _COMMON_MARKETS = {
@@ -35,6 +37,11 @@ PLATFORMS: dict[str, BettingPlatform] = {
         aliases=("sportybet", "sporty bet"),
         market_names=_COMMON_MARKETS,
         supports_booking_codes=True,
+        booking_code_lookup=True,
+        booking_code_lookup_note=(
+            "experimental read-only lookup uses SportyBet's undocumented website endpoint "
+            "and may stop working if the site changes"
+        ),
     ),
     "bet9ja": BettingPlatform(
         key="bet9ja",
@@ -103,12 +110,16 @@ def platform_capability_summary(platform: BettingPlatform) -> str:
     else:
         booking = "booking/share-code support not configured"
 
-    if platform.programmatic_booking_code_api:
+    if platform.booking_code_lookup:
+        automation = (
+            f"{platform.booking_code_lookup_note}; automatic wager placement is not enabled"
+        )
+    elif platform.programmatic_booking_code_api:
         automation = "programmatic booking-code integration is configured"
     else:
         automation = (
             "no public programmatic booking-code API is configured in this project; "
-            "the assistant can format and analyse selections but does not place wagers"
+            "the assistant can format selections but does not place wagers"
         )
 
     return f"{platform.display_name}: {booking}; {automation}."
