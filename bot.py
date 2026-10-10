@@ -3709,6 +3709,7 @@ def _select_fixture_candidates_for_target_odds(
     target_odds: float,
     *,
     exact_count: int | None = None,
+    randomize: bool = False,
 ) -> list[dict[str, Any]]:
     """Choose at most one market per fixture while approaching target odds."""
     if target_odds <= 1.0:
@@ -3790,21 +3791,29 @@ def _select_fixture_candidates_for_target_odds(
         if abs(state[0] - target_log) <= tolerance
     ]
     if close:
-        best = max(
-            close,
+        close.sort(
             key=lambda state: (
-                state[1] / len(state[2]),
-                -abs(state[0] - target_log),
-            ),
+                -(state[1] / len(state[2])),
+                abs(state[0] - target_log),
+            )
         )
+        if randomize:
+            best = random.SystemRandom().choice(close[: min(10, len(close))])
+        else:
+            best = close[0]
     else:
-        best = min(
-            candidates,
+        candidates.sort(
             key=lambda state: (
                 abs(state[0] - target_log),
                 -state[1] / len(state[2]),
-            ),
+            )
         )
+        if randomize:
+            best = random.SystemRandom().choice(
+                candidates[: min(8, len(candidates))]
+            )
+        else:
+            best = candidates[0]
 
     return [
         groups[group_index][candidate_index]
@@ -3892,6 +3901,7 @@ def _build_model_ranked_sportybet_code(
                 usable_groups,
                 requested_target,
                 exact_count=requested_count,
+                randomize=randomize,
             )
         except ValueError as exc:
             return (
