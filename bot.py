@@ -2199,7 +2199,8 @@ def _sportybet_state_db_path() -> str:
 
 
 def _ensure_sportybet_slip_table() -> None:
-    with sqlite3.connect(_sportybet_state_db_path()) as connection:
+    connection = sqlite3.connect(_sportybet_state_db_path())
+    try:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS sportybet_slip_state (
@@ -2210,6 +2211,8 @@ def _ensure_sportybet_slip_table() -> None:
             """
         )
         connection.commit()
+    finally:
+        connection.close()
 
 
 def _persist_sportybet_slip_state(
@@ -2221,7 +2224,8 @@ def _persist_sportybet_slip_state(
     _ensure_sportybet_slip_table()
     payload = json.dumps(state, separators=(",", ":"))
     updated_at = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(_sportybet_state_db_path()) as connection:
+    connection = sqlite3.connect(_sportybet_state_db_path())
+    try:
         connection.execute(
             """
             INSERT INTO sportybet_slip_state (user_id, state_json, updated_at)
@@ -2233,6 +2237,8 @@ def _persist_sportybet_slip_state(
             (user_id, payload, updated_at),
         )
         connection.commit()
+    finally:
+        connection.close()
 
 
 def _load_sportybet_slip_state(
@@ -2241,7 +2247,8 @@ def _load_sportybet_slip_state(
     if not user_id:
         return None
     _ensure_sportybet_slip_table()
-    with sqlite3.connect(_sportybet_state_db_path()) as connection:
+    connection = sqlite3.connect(_sportybet_state_db_path())
+    try:
         row = connection.execute(
             """
             SELECT state_json
@@ -2250,6 +2257,8 @@ def _load_sportybet_slip_state(
             """,
             (user_id,),
         ).fetchone()
+    finally:
+        connection.close()
 
     if not row:
         return None
