@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from bot import _content_to_text, _current_turn_tool_outputs, sanitize_whatsapp_response
+from bot import _content_to_text, _current_turn_tool_outputs, _split_whatsapp_message, sanitize_whatsapp_response
 
 
 def main():
@@ -26,6 +26,12 @@ def main():
     ]
     outputs = _current_turn_tool_outputs(messages)
     assert outputs == ["Current tool output"]
+
+    long_message = ("A" * 900) + "\n\n" + ("B" * 900)
+    chunks = _split_whatsapp_message(long_message, max_chars=1500)
+    assert len(chunks) == 2
+    assert all(len(chunk) <= 1500 for chunk in chunks)
+    assert "".join(chunks).replace("\n", "") == long_message.replace("\n", "")
 
     print("WhatsApp response formatting test passed.")
 
