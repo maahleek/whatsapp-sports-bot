@@ -325,7 +325,7 @@ This is an experimental model-ranking workflow, not a guarantee of results or pr
 
 ### Editable SportyBet working slip
 
-When an existing SportyBet code is analysed or loaded, the bot also creates an in-memory working slip for that WhatsApp user. The original SportyBet code is never modified in place. Edits are applied to the working slip and a new share code is created only when the user asks for it.
+When an existing SportyBet code is analysed or loaded, the bot creates a per-user working slip and persists it in the configured SQLite memory database so editing can continue after an application restart. The original SportyBet code is never modified in place. Edits are applied to the working slip and a new share code is created only when the user asks for it.
 
 Examples:
 
@@ -351,8 +351,9 @@ The bot also accepts casual same-day code requests such as:
 ```text
 Give me a sure code for today
 Give me a 5-game code for today
+Give me a random 5-game code for today
 Give me a code around 5 odds for today
 Give me a 4-game code around 3 odds for today
 ```
 
-Words such as "sure" are interpreted as a request for higher model support, not as a guarantee. Target odds are approximate: the selection optimizer prioritizes independently modelled candidates and does not force the requested total by adding a weaker pick.
+Words such as "sure" are interpreted as a request for higher model support, not as a guarantee. Target odds are approximate: for fresh same-day codes the optimizer can compare multiple supported markets per fixture, while keeping at most one selection per match. It prioritizes independently modelled candidates and does not force the requested total by adding a weaker pick. For an already-edited working slip, target-odds commands can only remove selections; if the remaining slip is below the requested target, the bot explains that it cannot raise the total without restoring or adding selections.
