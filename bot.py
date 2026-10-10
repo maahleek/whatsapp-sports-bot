@@ -1784,6 +1784,51 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     if any(keyword in lowered for keyword in rule_keywords):
         return str(search_football_knowledge.invoke({"question": normalized}))
 
+    platform_pattern = r"(SportyBet|Bet9ja|BetKing|MSport|1xBet|Betway)"
+    platform_patterns = (
+        rf"^(?:give me\s+)?(.+?)\s+(?:vs\.?|versus)\s+(.+?)\s+"
+        rf"(?:betting\s+)?predictions?\s+(?:for|on)\s+{platform_pattern}[?.!]?$",
+        rf"^(?:predict|prediction|predictions)\s+(.+?)\s+(?:vs\.?|versus)\s+(.+?)\s+"
+        rf"(?:for|on)\s+{platform_pattern}[?.!]?$",
+    )
+    for pattern in platform_patterns:
+        platform_match = re.match(pattern, normalized, flags=re.IGNORECASE)
+        if platform_match:
+            team1 = platform_match.group(1).strip()
+            team2 = platform_match.group(2).strip()
+            platform = platform_match.group(3).strip()
+            _remember_matchup(user_id, team1, team2)
+            return str(
+                format_prediction_for_platform.invoke(
+                    {
+                        "team1": team1,
+                        "team2": team2,
+                        "platform": platform,
+                    }
+                )
+            )
+
+    platform_first_match = re.match(
+        rf"^{platform_pattern}\s+(?:prediction|predictions|betting prediction|betting predictions)\s+"
+        r"(.+?)\s+(?:vs\.?|versus)\s+(.+?)[?.!]?$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if platform_first_match:
+        platform = platform_first_match.group(1).strip()
+        team1 = platform_first_match.group(2).strip()
+        team2 = platform_first_match.group(3).strip()
+        _remember_matchup(user_id, team1, team2)
+        return str(
+            format_prediction_for_platform.invoke(
+                {
+                    "team1": team1,
+                    "team2": team2,
+                    "platform": platform,
+                }
+            )
+        )
+
     betting_terms = (
         "1x2", "moneyline", "double chance", "draw no bet", "dnb",
         "btts", "both teams to score", "over/under", "over under",
