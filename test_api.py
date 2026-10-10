@@ -422,6 +422,7 @@ def _sample_cached_sportybet_analysis():
                 "model_label": "Corners - Over/Under",
                 "alignment": None,
                 "gap": None,
+                "model_reason": "unsupported_market",
             },
         ],
     }
@@ -435,6 +436,8 @@ def test_sportybet_default_summary_is_compact():
     assert "SHOW MODELLED" in summary
     assert "SHOW UNMODELLED" in summary
     assert "SHOW ALL" in summary
+    assert "Unsupported market types:" in summary
+    assert "Corners - Over/Under" in summary
     assert len(summary) < 1500
 
 
