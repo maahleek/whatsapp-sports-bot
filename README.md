@@ -318,7 +318,7 @@ The WhatsApp router also supports an explicit request such as:
 Build me a 3-match SportyBet code for today's games
 ```
 
-The bot fetches today's current SportyBet pre-match catalogue, limits the scan to competitions supported by the independent football model, evaluates supported 1X2, Double Chance, BTTS, and full-match goal-total markets, keeps selections that meet the current model/odds quality filters, and prepares a non-staking SportyBet share code.
+The bot fetches today's current SportyBet pre-match catalogue, evaluates supported 1X2, Double Chance, BTTS, and full-match goal-total markets, prefers competitions with structured season data, and can fall back to independently sourced recent-form data when more fixtures are requested. Existing quality guards still require enough data for both teams before a selection can be used.
 
 This is an experimental model-ranking workflow, not a guarantee of results or profitability. It never submits a stake or places a wager.
 
@@ -344,7 +344,7 @@ Show current slip
 Create the new code
 ```
 
-The editor keeps a bounded undo/redo history per user. "Safer" means a different currently available market with higher independent model support when one can be verified; it is never presented as guaranteed.
+Multiple editor commands can also follow a load command in the same WhatsApp message, for example `Load SportyBet code HD46GX` followed on the next line by `Shorten to 10 selections`. The editor keeps a bounded undo/redo history per user. "Safer" means a different currently available market with higher independent model support when one can be verified; it is never presented as guaranteed.
 
 The bot also accepts casual same-day code requests such as:
 
