@@ -3,6 +3,7 @@ from bot import (
     _asian_handicap_probabilities,
     _asian_handicap_settlement,
     _betting_market_report,
+    _concise_platform_prediction_report,
     _extract_player_records,
     _normalize_team_name,
     _prediction_probabilities,
@@ -162,6 +163,28 @@ def test_specific_total_request_is_concise():
     assert "Over 3.5" not in report
 
 
+def test_platform_prediction_report_is_whatsapp_concise():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    platform = get_platform("SportyBet")
+    assert platform is not None
+    report = _concise_platform_prediction_report(context, platform)
+    assert "Platform: SportyBet" in report
+    assert "Model snapshot:" in report
+    assert len(report) < 1500
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -189,6 +212,7 @@ if __name__ == "__main__":
     test_quarter_asian_handicap_settlement_is_normalized()
     test_specific_total_line_settlement_is_normalized()
     test_specific_total_request_is_concise()
+    test_platform_prediction_report_is_whatsapp_concise()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
