@@ -1,0 +1,65 @@
+name: Build sanitized history refs
+
+on:
+  push:
+    branches:
+      - portfolio-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          ref: portfolio-hardening
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch both branches
+        run: |
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --force
+          git fetch origin +refs/heads/portfolio-hardening:refs/remotes/origin/portfolio-hardening --force
+          git branch -f main origin/main
+          git checkout portfolio-hardening
+
+      - name: Install git-filter-repo
+        run: python -m pip install git-filter-repo
+
+      - name: Remove runtime SQLite files from history
+        run: |
+          git filter-repo --force \
+            --path memory.db \
+            --path memory.db-shm \
+            --path memory.db-wal \
+            --invert-paths
+
+      - name: Verify sanitized history
+        shell: bash
+        run: |
+          if git rev-list --all --objects | grep -Eq ' (memory\.db|memory\.db-shm|memory\.db-wal)$'; then
+            echo "Runtime SQLite files are still reachable."
+            exit 1
+          fi
+
+      - name: Remove one-time sanitizer from cleaned portfolio branch
+        run: |
+          git checkout portfolio-hardening
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/sanitize-history.yml
+          git commit -m "Remove one-time history sanitizer"
+
+      - name: Publish sanitized refs for verification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git remote remove origin || true
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin refs/heads/main:refs/heads/sanitized-main-history
+          git push origin refs/heads/portfolio-hardening:refs/heads/sanitized-portfolio-history
