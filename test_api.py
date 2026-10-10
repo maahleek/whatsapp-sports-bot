@@ -643,6 +643,12 @@ def test_parse_casual_auto_sportybet_requests():
     assert _parse_auto_sportybet_code_request(
         "Give me a random 5-game code for today"
     ) == (5, 0.0, True)
+    assert _parse_auto_sportybet_code_request(
+        "Give me 5 games for today"
+    ) == (5, 0.0, False)
+    assert _parse_auto_sportybet_code_request(
+        "Give me 5 odds for today"
+    ) == (0, 5.0, False)
 
 
 def test_target_odds_subset_prefers_close_combination():
