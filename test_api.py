@@ -630,16 +630,19 @@ def test_sportybet_auto_candidates_rank_supported_markets():
 def test_parse_casual_auto_sportybet_requests():
     assert _parse_auto_sportybet_code_request(
         "Give me a sure code for today"
-    ) == (3, 0.0)
+    ) == (3, 0.0, False)
     assert _parse_auto_sportybet_code_request(
         "Give me a 5-game code for today"
-    ) == (5, 0.0)
+    ) == (5, 0.0, False)
     assert _parse_auto_sportybet_code_request(
         "Give me a code around 5 odds for today"
-    ) == (0, 5.0)
+    ) == (0, 5.0, False)
     assert _parse_auto_sportybet_code_request(
         "Give me a 4-game code around 3 odds for today"
-    ) == (4, 3.0)
+    ) == (4, 3.0, False)
+    assert _parse_auto_sportybet_code_request(
+        "Give me a random 5-game code for today"
+    ) == (5, 0.0, True)
 
 
 def test_target_odds_subset_prefers_close_combination():
