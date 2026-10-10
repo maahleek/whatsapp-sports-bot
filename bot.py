@@ -260,45 +260,110 @@ def _competition_standings(code: str) -> list[dict[str, Any]]:
     return standings[0].get("table", []) if standings else []
 
 
-def _season_team_summary(team_name: str) -> dict[str, float | int | str] | None:
+def _standing_team_match_score(requested: str, actual: str) -> int:
+    requested_key = _normalize_team_name(requested)
+    actual_key = _normalize_team_name(actual)
+    if not requested_key or not actual_key:
+        return 0
+    if requested_key == actual_key:
+        return 100
+    if len(requested_key) >= 5 and requested_key in actual_key:
+        return 90
+    if len(actual_key) >= 5 and actual_key in requested_key:
+        return 88
+
+    requested_tokens = set(requested_key.split())
+    actual_tokens = set(actual_key.split())
+    overlap = len(requested_tokens & actual_tokens)
+    if not overlap:
+        return 0
+
+    union = len(requested_tokens | actual_tokens)
+    return int(80 * overlap / max(1, union))
+
+
+def _season_summary_from_table(
+    team_name: str,
+    league_name: str,
+    table: list[dict[str, Any]],
+) -> dict[str, float | int | str] | None:
+    matches: list[tuple[int, dict[str, Any]]] = []
+    for item in table:
+        api_name = str(item.get("team", {}).get("name") or "")
+        score = _standing_team_match_score(team_name, api_name)
+        if score >= 80:
+            matches.append((score, item))
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda pair: pair[0], reverse=True)
+    best_score = matches[0][0]
+    best = [item for score, item in matches if score == best_score]
+    if len(best) != 1:
+        return None
+
+    item = best[0]
+    api_name = str(item.get("team", {}).get("name") or team_name)
+    played = int(item.get("playedGames") or 0)
+    if played <= 0:
+        return None
+
+    points = int(item.get("points") or 0)
+    goals_for = int(item.get("goalsFor") or 0)
+    goals_against = int(item.get("goalsAgainst") or 0)
+    goal_difference = int(
+        item.get("goalDifference")
+        if item.get("goalDifference") is not None
+        else goals_for - goals_against
+    )
+    return {
+        "team": api_name,
+        "league": league_name,
+        "played": played,
+        "points": points,
+        "position": int(item.get("position") or 0),
+        "goals_for": goals_for,
+        "goals_against": goals_against,
+        "points_per_game": points / played,
+        "goal_diff_per_game": goal_difference / played,
+    }
+
+
+def _season_team_summary(
+    team_name: str,
+    *,
+    league_hint: str = "",
+) -> dict[str, float | int | str] | None:
+    # For SportyBet fixture analysis, prefer the fixture's known league so
+    # structured season data can be used without first resolving the team
+    # through TheSportsDB. This avoids many failures caused by provider naming
+    # differences such as "FC Twente Enschede" vs "FC Twente".
+    hinted_code = _league_code(league_hint) if league_hint else None
+    if hinted_code:
+        try:
+            hinted_table = _competition_standings(hinted_code)
+            hinted_summary = _season_summary_from_table(
+                team_name,
+                league_hint,
+                hinted_table,
+            )
+            if hinted_summary is not None:
+                return hinted_summary
+        except Exception:
+            pass
+
     profile = _team_profile(team_name)
     code = _league_code(profile["league"])
     if not code:
         return None
 
     table = _competition_standings(code)
-    target = _normalize_team_name(profile["name"])
-
-    for item in table:
-        api_name = str(item.get("team", {}).get("name") or "")
-        if _normalize_team_name(api_name) != target:
-            continue
-
-        played = int(item.get("playedGames") or 0)
-        if played <= 0:
-            return None
-
-        points = int(item.get("points") or 0)
-        goals_for = int(item.get("goalsFor") or 0)
-        goals_against = int(item.get("goalsAgainst") or 0)
-        goal_difference = int(
-            item.get("goalDifference")
-            if item.get("goalDifference") is not None
-            else goals_for - goals_against
-        )
-        return {
-            "team": profile["name"],
-            "league": profile["league"],
-            "played": played,
-            "points": points,
-            "position": int(item.get("position") or 0),
-            "goals_for": goals_for,
-            "goals_against": goals_against,
-            "points_per_game": points / played,
-            "goal_diff_per_game": goal_difference / played,
-        }
-
-    return None
+    return _season_summary_from_table(
+        profile["name"],
+        profile["league"],
+        table,
+    )
 
 
 def _prediction_strength(
@@ -904,13 +969,21 @@ def _build_prediction_context(
     first_season = second_season = None
     first_recent = second_recent = None
 
+    league_hint = str((known_fixture or {}).get("league") or "")
+
     if not recent_only:
         try:
-            first_season = _season_team_summary(team1)
+            first_season = _season_team_summary(
+                team1,
+                league_hint=league_hint,
+            )
         except Exception:
             pass
         try:
-            second_season = _season_team_summary(team2)
+            second_season = _season_team_summary(
+                team2,
+                league_hint=league_hint,
+            )
         except Exception:
             pass
     if not (prefer_season_only and first_season is not None):
@@ -3924,7 +3997,12 @@ def _build_model_ranked_sportybet_code(
             context = _build_prediction_context(
                 home,
                 away,
-                known_fixture={"home": home, "away": away, "date": date_text},
+                known_fixture={
+                    "home": home,
+                    "away": away,
+                    "date": date_text,
+                    "league": str(fixture.get("league") or ""),
+                },
                 recent_only=False,
                 prefer_season_only=True,
             )
@@ -4036,6 +4114,21 @@ def _build_model_ranked_sportybet_code(
                 value = reason_counts.get(key, 0)
                 if value:
                     lines.append(f"- {label}: {value}")
+
+            failed_examples = [
+                result
+                for result in evaluated_results
+                if result.get("reason") == "independent_data_error"
+            ][:5]
+            if failed_examples:
+                lines.extend(["", "Example data lookup failures:"])
+                for result in failed_examples:
+                    fixture = result.get("fixture") or {}
+                    league = str(fixture.get("league") or "Unknown league")
+                    lines.append(
+                        f"- {result.get('home_team')} vs {result.get('away_team')} "
+                        f"({league})"
+                    )
 
             if pool:
                 lines.extend(["", "Qualified selections currently available:"])
