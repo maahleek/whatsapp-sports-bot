@@ -2796,6 +2796,17 @@ def _target_sportybet_slip_odds(
     requested_target = float(target_odds)
     if (
         current_combined is not None
+        and abs(current_combined - requested_target)
+        <= max(0.02, requested_target * 0.01)
+    ):
+        return (
+            f"The current working slip is already about "
+            f"{current_combined:.2f} odds, so I left it unchanged.\n\n"
+            + _format_sportybet_working_slip(user_id, detail_limit=10)
+        )
+
+    if (
+        current_combined is not None
         and current_combined < requested_target * 0.95
     ):
         return (
@@ -3846,21 +3857,33 @@ def _build_model_ranked_sportybet_code(
         timeline_hours=48,
         max_pages=20,
     )
-    today = [
+    today_all = [
         fixture
         for fixture in fixtures
         if start_ms <= int(fixture.get("start_ms") or 0) < end_ms
         and str(fixture.get("match_status") or "Not start") == "Not start"
-        and _league_code(str(fixture.get("league") or "")) is not None
     ]
 
-    if not today:
+    if not today_all:
         return (
-            f"I couldn't find any supported SportyBet fixtures for {date_text}. "
+            f"I couldn't find any SportyBet fixtures for {date_text}. "
             "Try another date or create a code from explicit selections."
         )
 
-    today = today[:20]
+    # Prefer leagues with structured season data. If the user requests more
+    # games than that pool can support, a small fallback set is evaluated
+    # with the same independent model using recent-form data. The existing
+    # quality guard still requires enough data for both teams.
+    today_primary = [
+        fixture
+        for fixture in today_all
+        if _league_code(str(fixture.get("league") or "")) is not None
+    ][:20]
+    today_fallback = [
+        fixture
+        for fixture in today_all
+        if _league_code(str(fixture.get("league") or "")) is None
+    ][:12]
 
     def evaluate(fixture: dict[str, Any]) -> list[dict[str, Any]]:
         home = str(fixture.get("home_team") or "")
@@ -3883,12 +3906,27 @@ def _build_model_ranked_sportybet_code(
             return []
 
     with ThreadPoolExecutor(max_workers=6) as executor:
-        fixture_candidates = list(executor.map(evaluate, today))
+        fixture_candidates = list(executor.map(evaluate, today_primary))
 
     usable_groups = [
         candidates for candidates in fixture_candidates
         if candidates
     ]
+
+    if (
+        requested_count is not None
+        and len(usable_groups) < requested_count
+        and today_fallback
+    ):
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            fallback_candidates = list(
+                executor.map(evaluate, today_fallback)
+            )
+        usable_groups.extend(
+            candidates
+            for candidates in fallback_candidates
+            if candidates
+        )
     if not usable_groups:
         return (
             f"I couldn't find independently modelled SportyBet selections "
@@ -4361,6 +4399,47 @@ def _parse_auto_sportybet_code_request(
 
 def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     """Route guarded factual intents directly to deterministic tools."""
+    raw_commands = [
+        part.strip()
+        for part in re.split(r"[\r\n;]+", message)
+        if part.strip()
+    ]
+    if len(raw_commands) > 1:
+        first_load = re.fullmatch(
+            r"(?:analyse|analyze|check|review|load|get)\s+(?:this\s+)?"
+            r"(?:sportybet\s+)?(?:booking\s+|share\s+)?code[:\s]+"
+            r"([A-Z0-9]{4,12})[?.!]?",
+            raw_commands[0],
+            flags=re.IGNORECASE,
+        )
+        if first_load:
+            try:
+                analysis = _run_sportybet_booking_analysis(
+                    first_load.group(1)
+                )
+                _cache_sportybet_analysis(user_id, analysis)
+                _initialize_sportybet_working_slip(user_id, analysis)
+            except (ValueError, SportyBetLookupError) as exc:
+                return str(exc)
+
+            responses: list[str] = []
+            for command in raw_commands[1:6]:
+                response = _direct_guarded_tool_response(command, user_id)
+                if response is not None:
+                    responses.append(response)
+
+            if responses:
+                return (
+                    f"Loaded SportyBet code {analysis['code']} and applied "
+                    f"{len(responses)} follow-up command"
+                    f"{'s' if len(responses) != 1 else ''}.\n\n"
+                    + "\n\n".join(responses)
+                )
+
+            return (
+                _format_sportybet_analysis_summary(analysis)
+                + "\n\nWorking slip loaded."
+            )
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.casefold()
 
