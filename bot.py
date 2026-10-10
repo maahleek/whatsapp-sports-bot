@@ -3894,11 +3894,19 @@ def _build_model_ranked_sportybet_code(
         if _league_code(str(fixture.get("league") or "")) is None
     ][:40]
 
-    def evaluate(fixture: dict[str, Any]) -> list[dict[str, Any]]:
+    def evaluate(fixture: dict[str, Any]) -> dict[str, Any]:
         home = str(fixture.get("home_team") or "")
         away = str(fixture.get("away_team") or "")
+        base = {
+            "fixture": fixture,
+            "home_team": home,
+            "away_team": away,
+            "candidates": [],
+            "reason": "",
+        }
         if not home or not away:
-            return []
+            return {**base, "reason": "missing_match_data"}
+
         try:
             context = _build_prediction_context(
                 home,
@@ -3907,19 +3915,35 @@ def _build_model_ranked_sportybet_code(
                 recent_only=False,
                 prefer_season_only=True,
             )
-            return _sportybet_auto_candidates_for_fixture(
-                fixture,
-                context,
-            )
         except Exception:
-            return []
+            return {**base, "reason": "independent_data_error"}
+
+        if context.get("projection") is None:
+            return {**base, "reason": "no_score_projection"}
+        if not _sportybet_context_has_enough_data(context):
+            return {**base, "reason": "insufficient_independent_data"}
+
+        candidates = _sportybet_auto_candidates_for_fixture(
+            fixture,
+            context,
+        )
+        if not candidates:
+            return {**base, "reason": "no_market_passed_filters"}
+
+        return {
+            **base,
+            "candidates": candidates,
+            "reason": "qualified",
+        }
 
     with ThreadPoolExecutor(max_workers=6) as executor:
-        fixture_candidates = list(executor.map(evaluate, today_primary))
+        primary_results = list(executor.map(evaluate, today_primary))
 
+    evaluated_results = list(primary_results)
     usable_groups = [
-        candidates for candidates in fixture_candidates
-        if candidates
+        result["candidates"]
+        for result in primary_results
+        if result["candidates"]
     ]
 
     if (
@@ -3934,13 +3958,14 @@ def _build_model_ranked_sportybet_code(
         for offset in range(0, len(today_fallback), fallback_batch_size):
             batch = today_fallback[offset : offset + fallback_batch_size]
             with ThreadPoolExecutor(max_workers=6) as executor:
-                fallback_candidates = list(
+                fallback_results = list(
                     executor.map(evaluate, batch)
                 )
+            evaluated_results.extend(fallback_results)
             usable_groups.extend(
-                candidates
-                for candidates in fallback_candidates
-                if candidates
+                result["candidates"]
+                for result in fallback_results
+                if result["candidates"]
             )
             if len(usable_groups) >= requested_count:
                 break
@@ -3974,11 +3999,47 @@ def _build_model_ranked_sportybet_code(
             reverse=True,
         )
         if len(pool) < count:
-            return (
+            reason_counts: dict[str, int] = {}
+            for result in evaluated_results:
+                reason = str(result.get("reason") or "unknown")
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+            lines = [
                 f"I found only {len(pool)} independently modelled SportyBet "
                 f"selection(s) meeting the current quality filters for {date_text}; "
-                f"{count} were requested. No booking code was created."
+                f"{count} were requested. No booking code was created.",
+                "",
+                f"Fixtures checked: {len(evaluated_results)}",
+            ]
+
+            diagnostic_labels = (
+                ("insufficient_independent_data", "Not enough independent team data"),
+                ("independent_data_error", "Independent data lookup failed"),
+                ("no_score_projection", "No usable score projection"),
+                ("no_market_passed_filters", "No supported market passed the model/odds filters"),
+                ("missing_match_data", "Missing fixture/team data"),
             )
+            for key, label in diagnostic_labels:
+                value = reason_counts.get(key, 0)
+                if value:
+                    lines.append(f"- {label}: {value}")
+
+            if pool:
+                lines.extend(["", "Qualified selections currently available:"])
+                for index, item in enumerate(pool[:count], start=1):
+                    lines.append(
+                        f"{index}. {item['home_team']} vs {item['away_team']} - "
+                        f"{item['model_label']} @ {float(item['odds']):.2f} "
+                        f"({float(item['model_probability']) * 100:.1f}% model support)"
+                    )
+
+            lines.extend(
+                [
+                    "",
+                    "I kept the quality filters unchanged rather than adding an unqualified fifth selection.",
+                ]
+            )
+            return "\n".join(lines)
 
         if randomize:
             strong_pool = [
