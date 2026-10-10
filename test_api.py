@@ -19,6 +19,13 @@ from bot import (
     _sportybet_fixture_suggestions,
     _resolve_sportybet_pick,
     _sportybet_auto_candidates_for_fixture,
+    _parse_auto_sportybet_code_request,
+    _select_records_for_target_odds,
+    _initialize_sportybet_working_slip,
+    _sportybet_working_slip,
+    _remove_sportybet_slip_indexes,
+    _undo_sportybet_slip,
+    _redo_sportybet_slip,
     _total_line_settlement,
     _remember_matchup,
     _last_matchup,
@@ -613,6 +620,92 @@ def test_sportybet_auto_candidates_rank_supported_markets():
     assert all(1.20 <= item["odds"] <= 3.50 for item in candidates)
 
 
+def test_parse_casual_auto_sportybet_requests():
+    assert _parse_auto_sportybet_code_request(
+        "Give me a sure code for today"
+    ) == (3, 0.0)
+    assert _parse_auto_sportybet_code_request(
+        "Give me a 5-game code for today"
+    ) == (5, 0.0)
+    assert _parse_auto_sportybet_code_request(
+        "Give me a code around 5 odds for today"
+    ) == (0, 5.0)
+    assert _parse_auto_sportybet_code_request(
+        "Give me a 4-game code around 3 odds for today"
+    ) == (4, 3.0)
+
+
+def test_target_odds_subset_prefers_close_combination():
+    records = [
+        {"odds": 1.50, "model_probability": 0.80},
+        {"odds": 1.40, "model_probability": 0.78},
+        {"odds": 1.30, "model_probability": 0.76},
+        {"odds": 2.80, "model_probability": 0.56},
+    ]
+    selected = _select_records_for_target_odds(
+        records,
+        2.10,
+        exact_count=2,
+    )
+    combined = 1.0
+    for item in selected:
+        combined *= item["odds"]
+    assert len(selected) == 2
+    assert abs(combined - 2.10) < 0.20
+
+
+def test_working_slip_remove_undo_redo():
+    user_id = "sportybet-editor-test"
+    analysis = {
+        "code": "ABC123",
+        "records": [
+            {
+                "index": 1,
+                "source_index": 1,
+                "home_team": "A",
+                "away_team": "B",
+                "outcome_name": "Home",
+                "odds": 1.50,
+                "model_probability": 0.70,
+            },
+            {
+                "index": 2,
+                "source_index": 2,
+                "home_team": "C",
+                "away_team": "D",
+                "outcome_name": "Over 1.5",
+                "odds": 1.30,
+                "model_probability": 0.75,
+            },
+            {
+                "index": 3,
+                "source_index": 3,
+                "home_team": "E",
+                "away_team": "F",
+                "outcome_name": "X2",
+                "odds": 1.40,
+                "model_probability": None,
+                "platform_probability": 0.71,
+            },
+        ],
+    }
+    _initialize_sportybet_working_slip(user_id, analysis)
+    _remove_sportybet_slip_indexes(user_id, [2])
+    state = _sportybet_working_slip(user_id)
+    assert state is not None
+    assert len(state["current"]) == 2
+
+    _undo_sportybet_slip(user_id)
+    state = _sportybet_working_slip(user_id)
+    assert state is not None
+    assert len(state["current"]) == 3
+
+    _redo_sportybet_slip(user_id)
+    state = _sportybet_working_slip(user_id)
+    assert state is not None
+    assert len(state["current"]) == 2
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -660,6 +753,9 @@ if __name__ == "__main__":
     test_resolve_sportybet_double_chance_for_creation()
     test_resolve_sportybet_btts_for_creation()
     test_sportybet_auto_candidates_rank_supported_markets()
+    test_parse_casual_auto_sportybet_requests()
+    test_target_odds_subset_prefers_close_combination()
+    test_working_slip_remove_undo_redo()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
