@@ -691,6 +691,34 @@ def test_grouped_target_odds_can_use_alternate_markets():
     assert abs(combined - 5.0) < 0.55
 
 
+def test_grouped_target_odds_random_mode_stays_near_target():
+    groups = [
+        [
+            {"odds": 1.20, "model_probability": 0.90},
+            {"odds": 1.80, "model_probability": 0.76},
+        ],
+        [
+            {"odds": 1.20, "model_probability": 0.89},
+            {"odds": 1.70, "model_probability": 0.75},
+        ],
+        [
+            {"odds": 1.20, "model_probability": 0.88},
+            {"odds": 1.60, "model_probability": 0.74},
+        ],
+    ]
+    selected = _select_fixture_candidates_for_target_odds(
+        groups,
+        5.0,
+        exact_count=3,
+        randomize=True,
+    )
+    combined = 1.0
+    for item in selected:
+        combined *= item["odds"]
+    assert len(selected) == 3
+    assert 4.0 <= combined <= 5.5
+
+
 def test_working_slip_target_cannot_raise_existing_odds():
     previous_db = os.environ.get("MEMORY_DB_PATH")
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -839,6 +867,7 @@ if __name__ == "__main__":
     test_parse_casual_auto_sportybet_requests()
     test_target_odds_subset_prefers_close_combination()
     test_grouped_target_odds_can_use_alternate_markets()
+    test_grouped_target_odds_random_mode_stays_near_target()
     test_working_slip_target_cannot_raise_existing_odds()
     test_working_slip_remove_undo_redo()
     test_betting_platform_aliases()
