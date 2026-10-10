@@ -4186,6 +4186,14 @@ def _build_model_ranked_sportybet_code(
         lines.append(f"Requested target odds: {requested_target:.2f}")
     if combined is not None:
         lines.append(f"Combined odds: {combined:.2f}")
+    if randomize:
+        lines.append(
+            "Selection mode: randomized from qualifying model-supported matches"
+        )
+    else:
+        lines.append(
+            "Selection mode: highest-ranked qualifying model-supported matches"
+        )
 
     lines.extend(["", "Selections:"])
     booked_by_event = {
