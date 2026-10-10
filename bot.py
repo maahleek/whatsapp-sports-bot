@@ -2020,16 +2020,83 @@ def ask_agent(message: str, user_id: str) -> str:
     return sanitize_whatsapp_response(_content_to_text(raw_content))
 
 
+def _split_whatsapp_message(body: str, max_chars: int = 1500) -> list[str]:
+    """Split long WhatsApp replies into Twilio-safe chunks."""
+    text = body.strip()
+    if not text:
+        return [""]
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+
+    def flush() -> None:
+        nonlocal current
+        if current.strip():
+            chunks.append(current.strip())
+            current = ""
+
+    for paragraph in text.split("\n\n"):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+
+        candidate = paragraph if not current else f"{current}\n\n{paragraph}"
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+
+        flush()
+
+        if len(paragraph) <= max_chars:
+            current = paragraph
+            continue
+
+        for line in paragraph.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            if len(line) <= max_chars:
+                candidate = line if not current else f"{current}\n{line}"
+                if len(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    flush()
+                    current = line
+                continue
+
+            words = line.split()
+            for word in words:
+                if len(word) > max_chars:
+                    flush()
+                    for start in range(0, len(word), max_chars):
+                        chunks.append(word[start:start + max_chars])
+                    continue
+
+                candidate = word if not current else f"{current} {word}"
+                if len(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    flush()
+                    current = word
+
+    flush()
+    return chunks
+
+
 def _send_whatsapp_message(to: str, body: str) -> None:
     client = Client(
         _require_env("TWILIO_ACCOUNT_SID"),
         _require_env("TWILIO_AUTH_TOKEN"),
     )
-    client.messages.create(
-        from_=TWILIO_WHATSAPP_FROM,
-        to=to,
-        body=body,
-    )
+    for chunk in _split_whatsapp_message(body):
+        client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            to=to,
+            body=chunk,
+        )
 
 
 def process_and_reply(message: str, sender: str) -> None:
