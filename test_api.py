@@ -256,7 +256,8 @@ def test_platform_capability_is_honest_about_booking_codes():
     assert platform is not None
     summary = platform_capability_summary(platform)
     assert "supports booking/share codes" in summary
-    assert "no public programmatic booking-code API is configured" in summary
+    assert "experimental read-only lookup" in summary
+    assert "automatic wager placement is not enabled" in summary
 
 
 if __name__ == "__main__":
