@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import re
@@ -2192,6 +2193,73 @@ def _format_sportybet_cached_view(
     return "\n".join(lines).strip()
 
 
+def _sportybet_state_db_path() -> str:
+    return os.getenv("MEMORY_DB_PATH", "memory.db")
+
+
+def _ensure_sportybet_slip_table() -> None:
+    with sqlite3.connect(_sportybet_state_db_path()) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sportybet_slip_state (
+                user_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+
+def _persist_sportybet_slip_state(
+    user_id: str,
+    state: dict[str, Any],
+) -> None:
+    if not user_id:
+        return
+    _ensure_sportybet_slip_table()
+    payload = json.dumps(state, separators=(",", ":"))
+    updated_at = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(_sportybet_state_db_path()) as connection:
+        connection.execute(
+            """
+            INSERT INTO sportybet_slip_state (user_id, state_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, payload, updated_at),
+        )
+        connection.commit()
+
+
+def _load_sportybet_slip_state(
+    user_id: str,
+) -> dict[str, Any] | None:
+    if not user_id:
+        return None
+    _ensure_sportybet_slip_table()
+    with sqlite3.connect(_sportybet_state_db_path()) as connection:
+        row = connection.execute(
+            """
+            SELECT state_json
+            FROM sportybet_slip_state
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    try:
+        state = json.loads(str(row[0]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
 def _clone_sportybet_records(
     records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -2230,34 +2298,43 @@ def _initialize_sportybet_working_slip(
     current = _reindex_sportybet_records(
         list(analysis.get("records") or [])
     )
+    state = {
+        "source_code": str(analysis.get("code") or ""),
+        "current": current,
+        "undo": [],
+        "redo": [],
+    }
     with _SPORTYBET_SLIP_STATE_LOCK:
-        _SPORTYBET_SLIP_STATES[user_id] = {
-            "source_code": str(analysis.get("code") or ""),
-            "current": current,
-            "undo": [],
-            "redo": [],
-        }
+        _SPORTYBET_SLIP_STATES[user_id] = state
+    _persist_sportybet_slip_state(user_id, state)
 
 
 def _sportybet_working_slip(user_id: str) -> dict[str, Any] | None:
     if not user_id:
         return None
+
     with _SPORTYBET_SLIP_STATE_LOCK:
         state = _SPORTYBET_SLIP_STATES.get(user_id)
+
+    if state is None:
+        state = _load_sportybet_slip_state(user_id)
         if state is None:
             return None
-        return {
-            "source_code": state.get("source_code", ""),
-            "current": _clone_sportybet_records(state.get("current") or []),
-            "undo": [
-                _clone_sportybet_records(snapshot)
-                for snapshot in (state.get("undo") or [])
-            ],
-            "redo": [
-                _clone_sportybet_records(snapshot)
-                for snapshot in (state.get("redo") or [])
-            ],
-        }
+        with _SPORTYBET_SLIP_STATE_LOCK:
+            _SPORTYBET_SLIP_STATES[user_id] = state
+
+    return {
+        "source_code": state.get("source_code", ""),
+        "current": _clone_sportybet_records(state.get("current") or []),
+        "undo": [
+            _clone_sportybet_records(snapshot)
+            for snapshot in (state.get("undo") or [])
+        ],
+        "redo": [
+            _clone_sportybet_records(snapshot)
+            for snapshot in (state.get("redo") or [])
+        ],
+    }
 
 
 def _replace_sportybet_working_slip(
@@ -2282,6 +2359,16 @@ def _replace_sportybet_working_slip(
             del undo[:-20]
         state["current"] = updated
         state["redo"] = []
+        persisted = {
+            "source_code": state.get("source_code", ""),
+            "current": _clone_sportybet_records(state.get("current") or []),
+            "undo": [
+                _clone_sportybet_records(snapshot)
+                for snapshot in (state.get("undo") or [])
+            ],
+            "redo": [],
+        }
+    _persist_sportybet_slip_state(user_id, persisted)
     return _clone_sportybet_records(updated)
 
 
@@ -2299,7 +2386,20 @@ def _undo_sportybet_slip(user_id: str) -> str:
         state.setdefault("redo", []).append(current)
         state["current"] = _reindex_sportybet_records(previous)
         count = len(state["current"])
+        persisted = {
+            "source_code": state.get("source_code", ""),
+            "current": _clone_sportybet_records(state.get("current") or []),
+            "undo": [
+                _clone_sportybet_records(snapshot)
+                for snapshot in (state.get("undo") or [])
+            ],
+            "redo": [
+                _clone_sportybet_records(snapshot)
+                for snapshot in (state.get("redo") or [])
+            ],
+        }
 
+    _persist_sportybet_slip_state(user_id, persisted)
     return f"Undone. The working SportyBet slip now has {count} selections."
 
 
@@ -2317,7 +2417,20 @@ def _redo_sportybet_slip(user_id: str) -> str:
         state.setdefault("undo", []).append(current)
         state["current"] = _reindex_sportybet_records(next_state)
         count = len(state["current"])
+        persisted = {
+            "source_code": state.get("source_code", ""),
+            "current": _clone_sportybet_records(state.get("current") or []),
+            "undo": [
+                _clone_sportybet_records(snapshot)
+                for snapshot in (state.get("undo") or [])
+            ],
+            "redo": [
+                _clone_sportybet_records(snapshot)
+                for snapshot in (state.get("redo") or [])
+            ],
+        }
 
+    _persist_sportybet_slip_state(user_id, persisted)
     return f"Redone. The working SportyBet slip now has {count} selections."
 
 
