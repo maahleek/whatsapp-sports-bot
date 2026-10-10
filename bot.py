@@ -1577,9 +1577,9 @@ def _sportybet_selection_model_support(
 ) -> tuple[float | None, str]:
     """Return model support for a normalized SportyBet selection."""
     home, away, matrix = _fixture_order_projection(context)
-    market = str(selection.get("market_name") or "").casefold()
+    market = str(selection.get("market_name") or "").casefold().strip()
     market_id = str(selection.get("market_id") or "")
-    outcome = str(selection.get("outcome_name") or "").casefold()
+    outcome = str(selection.get("outcome_name") or "").casefold().strip()
     outcome_id = str(selection.get("outcome_id") or "")
     specifier = str(selection.get("specifier") or "")
 
@@ -1587,37 +1587,65 @@ def _sportybet_selection_model_support(
     draw = sum(p for h, a, p in matrix if h == a)
     away_win = sum(p for h, a, p in matrix if h < a)
 
-    if market_id == "1" or "1x2" in market or "match result" in market:
-        if outcome_id == "1" or "home" in outcome or outcome.strip() == "1":
+    # Do not reinterpret event-level or half-specific markets as full-match goals.
+    unsupported_scope_terms = (
+        "corner",
+        "1st half",
+        "first half",
+        "2nd half",
+        "second half",
+        "both halves",
+        "either half",
+        "player",
+        "card",
+        "booking",
+        "shots",
+    )
+    if any(term in market for term in unsupported_scope_terms):
+        return None, str(selection.get("market_name") or "Unsupported market")
+
+    # Full-match 1X2 only.
+    if market_id == "1" or market in {"1x2", "match result"}:
+        if outcome_id == "1" or "home" in outcome or outcome == "1":
             return home_win, "1X2 home"
-        if outcome_id == "2" or "draw" in outcome or outcome.strip() == "x":
+        if outcome_id == "2" or "draw" in outcome or outcome == "x":
             return draw, "1X2 draw"
-        if outcome_id == "3" or "away" in outcome or outcome.strip() == "2":
+        if outcome_id == "3" or "away" in outcome or outcome == "2":
             return away_win, "1X2 away"
 
-    if "double chance" in market or market_id == "10":
-        compact = re.sub(r"[^12x]", "", outcome)
-        if compact == "1x":
+    # Full-match Double Chance. SportyBet may use either 1/X/2 or words.
+    if market_id == "10" or market == "double chance":
+        normalized_outcome = re.sub(r"[^a-z0-9]", "", outcome)
+        if (
+            "homeordraw" in normalized_outcome
+            or normalized_outcome in {"1x", "x1"}
+        ):
             return home_win + draw, "Double Chance 1X"
-        if compact == "x2":
+        if (
+            "draworaway" in normalized_outcome
+            or normalized_outcome in {"x2", "2x"}
+        ):
             return draw + away_win, "Double Chance X2"
-        if compact == "12":
+        if (
+            "homeoraway" in normalized_outcome
+            or normalized_outcome in {"12", "21"}
+        ):
             return home_win + away_win, "Double Chance 12"
 
+    # Full-match BTTS only.
     if (
-        "both teams to score" in market
-        or "gg/ng" in market
-        or market_id == "29"
+        market_id == "29"
+        or market in {"gg/ng", "both teams to score", "btts"}
     ):
         yes = sum(p for h, a, p in matrix if h > 0 and a > 0)
         is_yes = (
             "yes" in outcome
-            or outcome.strip() == "gg"
+            or outcome == "gg"
             or outcome_id.casefold() in {"yes", "gg"}
         )
         is_no = (
             "no" in outcome
-            or outcome.strip() == "ng"
+            or outcome == "ng"
             or outcome_id.casefold() in {"no", "ng"}
         )
         if is_yes:
@@ -1625,16 +1653,47 @@ def _sportybet_selection_model_support(
         if is_no:
             return 1.0 - yes, "Both Teams to Score - No"
 
-    if "draw no bet" in market or market_id == "11":
+    if market_id == "11" or market == "draw no bet":
         decisive = home_win + away_win
         if decisive <= 0:
             return None, "Draw No Bet"
-        if "home" in outcome or outcome.strip() == "1":
+        if "home" in outcome or outcome == "1":
             return home_win / decisive, "Draw No Bet - Home"
-        if "away" in outcome or outcome.strip() == "2":
+        if "away" in outcome or outcome == "2":
             return away_win / decisive, "Draw No Bet - Away"
 
-    if "over/under" in market or "total" in market or market_id == "18":
+    # Team-specific goal totals can be derived from the same score matrix.
+    team_total_side: str | None = None
+    home_key = _normalize_team_name(home)
+    away_key = _normalize_team_name(away)
+    market_key = _normalize_team_name(market)
+    if "over/under" in market:
+        if home_key and home_key in market_key:
+            team_total_side = "home"
+        elif away_key and away_key in market_key:
+            team_total_side = "away"
+
+    if team_total_side is not None:
+        line = _specifier_number(specifier, "total")
+        if line is None:
+            number = re.search(r"([0-9]+(?:\.[0-9]+)?)", outcome)
+            if number:
+                line = float(number.group(1))
+
+        side = "over" if "over" in outcome else "under" if "under" in outcome else None
+        if line is not None and side:
+            if team_total_side == "home":
+                over_probability = sum(p for h, _a, p in matrix if h > line)
+                team_name = home
+            else:
+                over_probability = sum(p for _h, a, p in matrix if a > line)
+                team_name = away
+
+            probability = over_probability if side == "over" else 1.0 - over_probability
+            return probability, f"{team_name} {side.title()} {line:g} Goals"
+
+    # Full-match goal total only. This deliberately excludes corner/card totals.
+    if market_id == "18" or market in {"over/under", "total goals", "goals over/under"}:
         line = _specifier_number(specifier, "total")
         if line is None:
             joined = f"{market} {outcome}"
@@ -1653,26 +1712,51 @@ def _sportybet_selection_model_support(
                 f"{side.title()} {line:g} Goals",
             )
 
+    # SportyBet combo markets such as "Away or Over 2.5".
+    combo = re.search(r"(home(?: team)?|away(?: team)?)\s+or\s+over\s+([0-9]+(?:\.[0-9]+)?)", market)
+    if combo:
+        selected_side = combo.group(1)
+        line = float(combo.group(2))
+        probability = sum(
+            p
+            for h, a, p in matrix
+            if (
+                (h > a if selected_side.startswith("home") else a > h)
+                or (h + a > line)
+            )
+        )
+        if "no" in outcome:
+            probability = 1.0 - probability
+        elif "yes" not in outcome:
+            return None, str(selection.get("market_name") or "Unsupported market")
+        label_side = home if selected_side.startswith("home") else away
+        return probability, f"{label_side} or Over {line:g} Goals"
+
     if "asian handicap" in market or market_id == "16":
         home_line = _specifier_number(specifier, "hcp")
-        if home_line is not None:
-            if "home" in outcome or outcome.strip() == "1":
-                settlement = _asian_handicap_settlement(
-                    matrix,
-                    home_line,
-                    side="home",
-                )
-                return _settlement_support(settlement), f"{home} {home_line:+g}"
-            if "away" in outcome or outcome.strip() == "2":
-                away_line = -home_line
-                settlement = _asian_handicap_settlement(
-                    matrix,
-                    away_line,
-                    side="away",
-                )
-                return _settlement_support(settlement), f"{away} {away_line:+g}"
 
-    if "correct score" in market or market_id == "45":
+        # Some SportyBet payloads include the selected line in the pick text.
+        pick_line_match = re.search(r"([+-]\d+(?:\.\d+)?)", outcome)
+        pick_line = float(pick_line_match.group(1)) if pick_line_match else None
+
+        if "home" in outcome or outcome == "1":
+            line = pick_line if pick_line is not None else home_line
+            if line is not None:
+                settlement = _asian_handicap_settlement(matrix, line, side="home")
+                return _settlement_support(settlement), f"{home} {line:+g}"
+
+        if "away" in outcome or outcome == "2":
+            if pick_line is not None:
+                line = pick_line
+            elif home_line is not None:
+                line = -home_line
+            else:
+                line = None
+            if line is not None:
+                settlement = _asian_handicap_settlement(matrix, line, side="away")
+                return _settlement_support(settlement), f"{away} {line:+g}"
+
+    if market_id == "45" or market == "correct score":
         score = re.search(r"(\d+)\s*[-:]\s*(\d+)", outcome)
         if score:
             wanted_home = int(score.group(1))
@@ -1685,7 +1769,6 @@ def _sportybet_selection_model_support(
             return probability, f"Correct Score {wanted_home}-{wanted_away}"
 
     return None, str(selection.get("market_name") or "Unsupported market")
-
 
 def _model_alignment(probability: float) -> str:
     if probability >= 0.65:
