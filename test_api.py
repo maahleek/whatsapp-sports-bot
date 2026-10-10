@@ -10,6 +10,7 @@ from bot import (
     _prediction_strength,
     _score_projection,
     _sportybet_selection_model_support,
+    _sportybet_context_has_enough_data,
     _total_line_settlement,
     _remember_matchup,
     _last_matchup,
@@ -330,6 +331,26 @@ def test_sportybet_team_total_is_modelled_as_team_goals():
     assert label == "Liverpool Over 0.5 Goals"
 
 
+def test_sportybet_context_rejects_tiny_recent_sample():
+    context = {
+        "first_season": None,
+        "second_season": None,
+        "first_recent": {"played": 1},
+        "second_recent": {"played": 5},
+    }
+    assert _sportybet_context_has_enough_data(context) is False
+
+
+def test_sportybet_context_accepts_season_data():
+    context = {
+        "first_season": {"played": 8},
+        "second_season": {"played": 8},
+        "first_recent": None,
+        "second_recent": None,
+    }
+    assert _sportybet_context_has_enough_data(context) is True
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -364,6 +385,8 @@ if __name__ == "__main__":
     test_sportybet_corner_total_is_not_treated_as_goals()
     test_sportybet_text_double_chance_home_or_away()
     test_sportybet_team_total_is_modelled_as_team_goals()
+    test_sportybet_context_rejects_tiny_recent_sample()
+    test_sportybet_context_accepts_season_data()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
