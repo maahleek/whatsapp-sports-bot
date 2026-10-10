@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import random
 import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -3814,6 +3815,7 @@ def _select_fixture_candidates_for_target_odds(
 def _build_model_ranked_sportybet_code(
     match_count: int = 0,
     target_odds: float = 0.0,
+    randomize: bool = False,
 ) -> str:
     """Build a non-staking SportyBet code from today's model-supported fixtures."""
     requested_count = int(match_count) if int(match_count) > 0 else None
@@ -3906,13 +3908,27 @@ def _build_model_ranked_sportybet_code(
             ),
             reverse=True,
         )
-        selected = pool[:count]
-        if len(selected) < count:
+        if len(pool) < count:
             return (
-                f"I found only {len(selected)} independently modelled SportyBet "
+                f"I found only {len(pool)} independently modelled SportyBet "
                 f"selection(s) meeting the current quality filters for {date_text}; "
                 f"{count} were requested. No booking code was created."
             )
+
+        if randomize:
+            strong_pool = [
+                item
+                for item in pool
+                if float(item.get("model_probability") or 0.0) >= 0.70
+            ]
+            source_pool = strong_pool if len(strong_pool) >= count else pool
+            selected = random.SystemRandom().sample(source_pool, count)
+            selected.sort(
+                key=lambda item: float(item.get("model_probability") or 0.0),
+                reverse=True,
+            )
+        else:
+            selected = pool[:count]
 
     booking = create_booking(selected)
     booked = booking.get("selections") or []
@@ -4005,12 +4021,14 @@ def _build_model_ranked_sportybet_code(
 def build_model_ranked_sportybet_code(
     match_count: int = 0,
     target_odds: float = 0.0,
+    randomize: bool = False,
 ) -> str:
     """Build a non-staking SportyBet code from today's high model-supported selections."""
     try:
         return _build_model_ranked_sportybet_code(
             match_count=match_count,
             target_odds=target_odds,
+            randomize=randomize,
         )
     except ValueError as exc:
         return str(exc)
@@ -4286,7 +4304,7 @@ def _current_turn_tool_outputs(messages: list[Any]) -> list[str]:
 
 def _parse_auto_sportybet_code_request(
     message: str,
-) -> tuple[int, float] | None:
+) -> tuple[int, float, bool] | None:
     """Parse casual requests for a model-ranked SportyBet code for today."""
     lowered = re.sub(r"\s+", " ", message.strip().casefold())
     if "code" not in lowered or "today" not in lowered:
@@ -4316,7 +4334,8 @@ def _parse_auto_sportybet_code_request(
     if match_count == 0 and target_odds == 0.0:
         match_count = 3
 
-    return match_count, target_odds
+    randomize = "random" in lowered
+    return match_count, target_odds, randomize
 
 
 def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
@@ -4471,12 +4490,13 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
 
     auto_request = _parse_auto_sportybet_code_request(message)
     if auto_request is not None:
-        match_count, target_odds = auto_request
+        match_count, target_odds, randomize = auto_request
         return str(
             build_model_ranked_sportybet_code.invoke(
                 {
                     "match_count": match_count,
                     "target_odds": target_odds,
+                    "randomize": randomize,
                 }
             )
         )
