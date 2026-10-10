@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 from betting_platforms import get_platform, normalize_platform_name, platform_capability_summary
 from bot import (
     _asian_handicap_probabilities,
@@ -21,6 +24,10 @@ from bot import (
     _sportybet_auto_candidates_for_fixture,
     _parse_auto_sportybet_code_request,
     _select_records_for_target_odds,
+    _select_fixture_candidates_for_target_odds,
+    _target_sportybet_slip_odds,
+    _load_sportybet_slip_state,
+    _SPORTYBET_SLIP_STATES,
     _initialize_sportybet_working_slip,
     _sportybet_working_slip,
     _remove_sportybet_slip_indexes,
@@ -654,56 +661,129 @@ def test_target_odds_subset_prefers_close_combination():
     assert abs(combined - 2.10) < 0.20
 
 
-def test_working_slip_remove_undo_redo():
-    user_id = "sportybet-editor-test"
-    analysis = {
-        "code": "ABC123",
-        "records": [
-            {
-                "index": 1,
-                "source_index": 1,
-                "home_team": "A",
-                "away_team": "B",
-                "outcome_name": "Home",
-                "odds": 1.50,
-                "model_probability": 0.70,
-            },
-            {
-                "index": 2,
-                "source_index": 2,
-                "home_team": "C",
-                "away_team": "D",
-                "outcome_name": "Over 1.5",
-                "odds": 1.30,
-                "model_probability": 0.75,
-            },
-            {
-                "index": 3,
-                "source_index": 3,
-                "home_team": "E",
-                "away_team": "F",
-                "outcome_name": "X2",
-                "odds": 1.40,
-                "model_probability": None,
-                "platform_probability": 0.71,
-            },
+def test_grouped_target_odds_can_use_alternate_markets():
+    groups = [
+        [
+            {"odds": 1.20, "model_probability": 0.90},
+            {"odds": 1.80, "model_probability": 0.76},
         ],
-    }
-    _initialize_sportybet_working_slip(user_id, analysis)
-    _remove_sportybet_slip_indexes(user_id, [2])
-    state = _sportybet_working_slip(user_id)
-    assert state is not None
-    assert len(state["current"]) == 2
+        [
+            {"odds": 1.20, "model_probability": 0.89},
+            {"odds": 1.70, "model_probability": 0.75},
+        ],
+        [
+            {"odds": 1.20, "model_probability": 0.88},
+            {"odds": 1.60, "model_probability": 0.74},
+        ],
+    ]
+    selected = _select_fixture_candidates_for_target_odds(
+        groups,
+        5.0,
+        exact_count=3,
+    )
+    combined = 1.0
+    for item in selected:
+        combined *= item["odds"]
+    assert len(selected) == 3
+    assert abs(combined - 5.0) < 0.55
 
-    _undo_sportybet_slip(user_id)
-    state = _sportybet_working_slip(user_id)
-    assert state is not None
-    assert len(state["current"]) == 3
 
-    _redo_sportybet_slip(user_id)
-    state = _sportybet_working_slip(user_id)
-    assert state is not None
-    assert len(state["current"]) == 2
+def test_working_slip_target_cannot_raise_existing_odds():
+    previous_db = os.environ.get("MEMORY_DB_PATH")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ["MEMORY_DB_PATH"] = os.path.join(temp_dir, "memory.db")
+        user_id = "sportybet-target-test"
+        analysis = {
+            "code": "ABC123",
+            "records": [
+                {
+                    "index": 1,
+                    "source_index": 1,
+                    "home_team": "A",
+                    "away_team": "B",
+                    "outcome_name": "Home",
+                    "odds": 1.40,
+                    "model_probability": 0.70,
+                }
+            ],
+        }
+        _initialize_sportybet_working_slip(user_id, analysis)
+        response = _target_sportybet_slip_odds(user_id, 5.0)
+        assert "cannot raise it to 5.00" in response
+
+    if previous_db is None:
+        os.environ.pop("MEMORY_DB_PATH", None)
+    else:
+        os.environ["MEMORY_DB_PATH"] = previous_db
+
+
+def test_working_slip_remove_undo_redo():
+    previous_db = os.environ.get("MEMORY_DB_PATH")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ["MEMORY_DB_PATH"] = os.path.join(temp_dir, "memory.db")
+        user_id = "sportybet-editor-test"
+        analysis = {
+            "code": "ABC123",
+            "records": [
+                {
+                    "index": 1,
+                    "source_index": 1,
+                    "home_team": "A",
+                    "away_team": "B",
+                    "outcome_name": "Home",
+                    "odds": 1.50,
+                    "model_probability": 0.70,
+                },
+                {
+                    "index": 2,
+                    "source_index": 2,
+                    "home_team": "C",
+                    "away_team": "D",
+                    "outcome_name": "Over 1.5",
+                    "odds": 1.30,
+                    "model_probability": 0.75,
+                },
+                {
+                    "index": 3,
+                    "source_index": 3,
+                    "home_team": "E",
+                    "away_team": "F",
+                    "outcome_name": "X2",
+                    "odds": 1.40,
+                    "model_probability": None,
+                    "platform_probability": 0.71,
+                },
+            ],
+        }
+        _initialize_sportybet_working_slip(user_id, analysis)
+        _remove_sportybet_slip_indexes(user_id, [2])
+        state = _sportybet_working_slip(user_id)
+        assert state is not None
+        assert len(state["current"]) == 2
+
+        persisted = _load_sportybet_slip_state(user_id)
+        assert persisted is not None
+        assert len(persisted["current"]) == 2
+
+        _SPORTYBET_SLIP_STATES.pop(user_id, None)
+        restored = _sportybet_working_slip(user_id)
+        assert restored is not None
+        assert len(restored["current"]) == 2
+
+        _undo_sportybet_slip(user_id)
+        state = _sportybet_working_slip(user_id)
+        assert state is not None
+        assert len(state["current"]) == 3
+
+        _redo_sportybet_slip(user_id)
+        state = _sportybet_working_slip(user_id)
+        assert state is not None
+        assert len(state["current"]) == 2
+
+    if previous_db is None:
+        os.environ.pop("MEMORY_DB_PATH", None)
+    else:
+        os.environ["MEMORY_DB_PATH"] = previous_db
 
 
 def test_betting_platform_aliases():
@@ -755,6 +835,8 @@ if __name__ == "__main__":
     test_sportybet_auto_candidates_rank_supported_markets()
     test_parse_casual_auto_sportybet_requests()
     test_target_odds_subset_prefers_close_combination()
+    test_grouped_target_odds_can_use_alternate_markets()
+    test_working_slip_target_cannot_raise_existing_odds()
     test_working_slip_remove_undo_redo()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
