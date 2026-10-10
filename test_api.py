@@ -244,6 +244,92 @@ def test_sportybet_selection_model_support_for_total():
     assert label == "Over 2.5 Goals"
 
 
+def test_sportybet_corner_total_is_not_treated_as_goals():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    probability, label = _sportybet_selection_model_support(
+        context,
+        {
+            "market_id": "166",
+            "market_name": "Corners - Over/Under",
+            "outcome_id": "12",
+            "outcome_name": "Over 8.5",
+            "specifier": "total=8.5",
+        },
+    )
+    assert probability is None
+    assert label == "Corners - Over/Under"
+
+
+def test_sportybet_text_double_chance_home_or_away():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    probability, label = _sportybet_selection_model_support(
+        context,
+        {
+            "market_id": "10",
+            "market_name": "Double Chance",
+            "outcome_id": "",
+            "outcome_name": "Home or Away",
+            "specifier": "",
+        },
+    )
+    assert probability is not None
+    assert 0.0 <= probability <= 1.0
+    assert label == "Double Chance 12"
+
+
+def test_sportybet_team_total_is_modelled_as_team_goals():
+    projection = _score_projection(
+        (1.8, 1.0),
+        (1.5, 1.2),
+        first_is_home=True,
+    )
+    context = {
+        "projection": projection,
+        "fixture": {"home": "Arsenal", "away": "Liverpool", "date": "2026-11-01"},
+        "first_name": "Arsenal",
+        "second_name": "Liverpool",
+        "first_is_home": True,
+        "venue_note": "Fixture: Arsenal vs Liverpool on 2026-11-01.",
+    }
+    probability, label = _sportybet_selection_model_support(
+        context,
+        {
+            "market_id": "24",
+            "market_name": "Liverpool Over/Under",
+            "outcome_id": "",
+            "outcome_name": "Over 0.5",
+            "specifier": "",
+        },
+    )
+    assert probability is not None
+    assert 0.0 <= probability <= 1.0
+    assert label == "Liverpool Over 0.5 Goals"
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -275,6 +361,9 @@ if __name__ == "__main__":
     test_platform_prediction_report_is_whatsapp_concise()
     test_sportybet_selection_model_support_for_1x2()
     test_sportybet_selection_model_support_for_total()
+    test_sportybet_corner_total_is_not_treated_as_goals()
+    test_sportybet_text_double_chance_home_or_away()
+    test_sportybet_team_total_is_modelled_as_team_goals()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
