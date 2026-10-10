@@ -17,7 +17,7 @@ The assistant combines a large language model with tool calling, live sports API
 - Explain a broad football-betting glossary through RAG
 - Estimate common betting-market probabilities such as 1X2, double chance, DNB, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score
 - Format model snapshots for SportyBet, Bet9ja, BetKing, MSport, 1xBet, and Betway
-- Load an existing SportyBet booking/share code through an experimental read-only integration and compare supported selections with the model
+- Load an existing SportyBet booking/share code through an experimental lookup integration and compare supported selections with the model
 - Return a compact booking-code summary by default and cache the detailed result for instant SHOW MODELLED, SHOW UNMODELLED, and SHOW ALL follow-ups
 - Create anonymous, non-staking SportyBet booking/share codes from explicit pre-match selections
 - Build a model-ranked multi-match SportyBet share code from today's supported fixtures without placing a wager
@@ -123,7 +123,7 @@ The assistant can load an existing SportyBet booking/share code and normalize it
 
 Supported model comparisons currently include common markets such as 1X2, double chance, draw no bet, BTTS, over/under totals, Asian handicap, and correct score when the returned market metadata is sufficient.
 
-This integration is intentionally read-only. It does not submit, confirm, stake, or place a wager.
+The existing-code analysis path is read-only: it only retrieves and normalizes an already-created share code. Separately, the project can create a new anonymous, non-staking share code from explicit or model-ranked selections. Neither path submits a stake or places a wager.
 
 SportyBet does not expose a documented public developer API for this workflow. The project therefore treats booking lookup as experimental and isolated behind `sportybet.py`; it uses an undocumented website endpoint that may change without notice. Account identifiers returned by the upstream payload are deliberately not included in the normalized booking data.
 
@@ -261,7 +261,7 @@ This version includes:
 - Poisson-based win/draw/loss and correct-score projections
 - betting-market probability calculations derived from the same score distribution
 - RAG-based betting terminology explanations
-- read-only SportyBet booking-code lookup isolated behind a dedicated adapter
+- experimental SportyBet booking-code lookup and non-staking share-code creation isolated behind a dedicated adapter
 - deliberate removal of upstream SportyBet account identifiers from normalized booking data
 
 ## Testing
@@ -358,4 +358,4 @@ Give me a code around 5 odds for today
 Give me a 4-game code around 3 odds for today
 ```
 
-Words such as "sure" are interpreted as a request for higher model support, not as a guarantee. Target odds are approximate: for fresh same-day codes the optimizer can compare multiple supported markets per fixture, while keeping at most one selection per match. It prioritizes independently modelled candidates and does not force the requested total by adding a weaker pick. For an already-edited working slip, target-odds commands can only remove selections; if the remaining slip is below the requested target, the bot explains that it cannot raise the total without restoring or adding selections.
+Words such as "sure" are interpreted as a request for higher model support, not as a guarantee. Random requests are sampled from qualifying model-supported matches rather than from arbitrary fixtures. Target odds are approximate: for fresh same-day codes the optimizer can compare multiple supported markets per fixture, while keeping at most one selection per match. It prioritizes independently modelled candidates and does not force the requested total by adding a weaker pick. For an already-edited working slip, target-odds commands can only remove selections; if the remaining slip is below the requested target, the bot explains that it cannot raise the total without restoring or adding selections.
