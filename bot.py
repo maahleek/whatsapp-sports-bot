@@ -19,7 +19,7 @@ from tavily import TavilyClient
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 
-from betting_platforms import get_platform, platform_capability_summary
+from betting_platforms import get_platform, platform_capability_summary, platform_market_name
 from rag import lookup_betting_term, search_knowledge
 
 load_dotenv()
@@ -1481,6 +1481,49 @@ def predict_betting_markets(team1: str, team2: str, market: str = "all") -> str:
         return f"I couldn't generate betting-market probabilities right now: {exc}"
 
 
+def _concise_platform_prediction_report(
+    context: dict[str, Any],
+    adapter: Any,
+) -> str:
+    """Build a short platform-oriented model snapshot suitable for WhatsApp."""
+    home, away, matrix = _fixture_order_projection(context)
+
+    home_win = sum(p for h, a, p in matrix if h > a)
+    draw = sum(p for h, a, p in matrix if h == a)
+    away_win = sum(p for h, a, p in matrix if h < a)
+    btts_yes = sum(p for h, a, p in matrix if h > 0 and a > 0)
+
+    over_15 = sum(p for h, a, p in matrix if h + a > 1.5)
+    under_35 = sum(p for h, a, p in matrix if h + a < 3.5)
+    home_plus_05 = home_win + draw
+    away_plus_05 = away_win + draw
+
+    top_score = max(matrix, key=lambda item: item[2])
+    score_h, score_a, score_p = top_score
+
+    lines = [
+        f"Platform: {adapter.display_name}",
+        f"{home} vs {away}",
+        context["venue_note"],
+        "",
+        "Model snapshot:",
+        f"- {platform_market_name(adapter, '1x2')}: {home} {home_win * 100:.1f}% | Draw {draw * 100:.1f}% | {away} {away_win * 100:.1f}%",
+        f"- {platform_market_name(adapter, 'double_chance')} 1X: {(home_win + draw) * 100:.1f}%",
+        f"- {platform_market_name(adapter, 'double_chance')} X2: {(draw + away_win) * 100:.1f}%",
+        f"- {platform_market_name(adapter, 'total_goals')} Over 1.5: {over_15 * 100:.1f}%",
+        f"- {platform_market_name(adapter, 'total_goals')} Under 3.5: {under_35 * 100:.1f}%",
+        f"- {platform_market_name(adapter, 'btts')} Yes: {btts_yes * 100:.1f}% | No: {(1.0 - btts_yes) * 100:.1f}%",
+        f"- {platform_market_name(adapter, 'asian_handicap')} {home} +0.5: {home_plus_05 * 100:.1f}%",
+        f"- {platform_market_name(adapter, 'asian_handicap')} {away} +0.5: {away_plus_05 * 100:.1f}%",
+        "",
+        f"Most likely exact score: {home} {score_h}-{score_a} {away} ({score_p * 100:.1f}%)",
+        "",
+        "Ask 'all betting predictions for them' for the full market sheet.",
+        "Model probabilities only; not guaranteed outcomes or betting advice.",
+    ]
+    return "\n".join(lines)
+
+
 @tool
 def format_prediction_for_platform(
     team1: str,
@@ -1503,13 +1546,8 @@ def format_prediction_for_platform(
                 f"to build market probabilities for {team1} vs {team2}."
             )
 
-        report = _betting_market_report(context, "all")
-        return (
-            f"Platform: {adapter.display_name}\n\n"
-            + report
-            + "\n\n"
-            + platform_capability_summary(adapter)
-        )
+        report = _concise_platform_prediction_report(context, adapter)
+        return report + "\n\n" + platform_capability_summary(adapter)
     except Exception as exc:
         return f"I couldn't format that platform analysis right now: {exc}"
 
@@ -2091,7 +2129,11 @@ def _send_whatsapp_message(to: str, body: str) -> None:
         _require_env("TWILIO_ACCOUNT_SID"),
         _require_env("TWILIO_AUTH_TOKEN"),
     )
-    for chunk in _split_whatsapp_message(body):
+    chunks = _split_whatsapp_message(body)
+    total_parts = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        if total_parts > 1:
+            chunk = f"Part {index}/{total_parts}\n{chunk}"
         client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
             to=to,
