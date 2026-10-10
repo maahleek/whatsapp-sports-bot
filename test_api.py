@@ -12,6 +12,8 @@ from bot import (
     _sportybet_selection_model_support,
     _sportybet_context_has_enough_data,
     _sportybet_platform_probability,
+    _format_sportybet_analysis_summary,
+    _format_sportybet_cached_view,
     _total_line_settlement,
     _remember_matchup,
     _last_matchup,
@@ -368,6 +370,88 @@ def test_sportybet_platform_probability_falls_back_to_odds():
     assert label == "Raw odds-implied chance"
 
 
+def _sample_cached_sportybet_analysis():
+    return {
+        "code": "ABC123",
+        "selection_count": 3,
+        "counts": {
+            "higher": 1,
+            "moderate": 0,
+            "lower": 1,
+            "unmodelled": 1,
+        },
+        "records": [
+            {
+                "index": 1,
+                "home_team": "Arsenal",
+                "away_team": "Chelsea",
+                "market_name": "Over/Under",
+                "outcome_name": "Over 2.5",
+                "odds": 1.50,
+                "platform_probability": 0.67,
+                "platform_probability_label": "SportyBet feed probability",
+                "model_probability": 0.72,
+                "model_label": "Over 2.5 Goals",
+                "alignment": "higher model support",
+                "gap": 5.0,
+            },
+            {
+                "index": 2,
+                "home_team": "Liverpool",
+                "away_team": "Everton",
+                "market_name": "1X2",
+                "outcome_name": "Home",
+                "odds": 1.80,
+                "platform_probability": 0.56,
+                "platform_probability_label": "Raw odds-implied chance",
+                "model_probability": 0.44,
+                "model_label": "1X2 home",
+                "alignment": "lower model support",
+                "gap": -12.0,
+            },
+            {
+                "index": 3,
+                "home_team": "Man Utd",
+                "away_team": "Tottenham",
+                "market_name": "Corners - Over/Under",
+                "outcome_name": "Over 8.5",
+                "odds": 1.36,
+                "platform_probability": 0.74,
+                "platform_probability_label": "SportyBet feed probability",
+                "model_probability": None,
+                "model_label": "Corners - Over/Under",
+                "alignment": None,
+                "gap": None,
+            },
+        ],
+    }
+
+
+def test_sportybet_default_summary_is_compact():
+    summary = _format_sportybet_analysis_summary(
+        _sample_cached_sportybet_analysis()
+    )
+    assert "SportyBet Code: ABC123" in summary
+    assert "SHOW MODELLED" in summary
+    assert "SHOW UNMODELLED" in summary
+    assert "SHOW ALL" in summary
+    assert len(summary) < 1500
+
+
+def test_sportybet_cached_views_filter_without_reanalysis():
+    analysis = _sample_cached_sportybet_analysis()
+    modelled = _format_sportybet_cached_view(analysis, "modelled")
+    unmodelled = _format_sportybet_cached_view(analysis, "unmodelled")
+
+    assert "Selections with independent model comparison: 2" in modelled
+    assert "Arsenal vs Chelsea" in modelled
+    assert "Man Utd vs Tottenham" not in modelled
+
+    assert "Selections without independent model comparison: 1" in unmodelled
+    assert "Man Utd vs Tottenham" in unmodelled
+    assert "Loaded from the cached analysis" in unmodelled
+
+
 def test_betting_platform_aliases():
     assert normalize_platform_name("SportyBet") == "sportybet"
     assert normalize_platform_name("sporty bet") == "sportybet"
@@ -406,6 +490,8 @@ if __name__ == "__main__":
     test_sportybet_context_accepts_season_data()
     test_sportybet_platform_probability_prefers_feed_value()
     test_sportybet_platform_probability_falls_back_to_odds()
+    test_sportybet_default_summary_is_compact()
+    test_sportybet_cached_views_filter_without_reanalysis()
     test_betting_platform_aliases()
     test_platform_capability_is_honest_about_booking_codes()
     print("API helper tests passed.")
