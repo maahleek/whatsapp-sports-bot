@@ -305,8 +305,9 @@ def _normalize_fixture(
 
 def _team_key(value: str) -> str:
     value = re.sub(r"[^a-z0-9 ]+", " ", (value or "").casefold())
+    aliases = {"utd": "united", "st": "saint"}
     tokens = [
-        token
+        aliases.get(token, token)
         for token in value.split()
         if token not in {"fc", "afc", "cf", "club", "football"}
     ]
@@ -330,7 +331,8 @@ def _team_matches(requested: str, actual: str) -> bool:
     if not req_tokens or not act_tokens:
         return False
     overlap = len(req_tokens & act_tokens)
-    return overlap >= max(1, min(len(req_tokens), len(act_tokens)) - 1)
+    required = 1 if min(len(req_tokens), len(act_tokens)) == 1 else 2
+    return overlap >= required
 
 
 def _fixture_matches_pair(
