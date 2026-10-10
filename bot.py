@@ -4,7 +4,7 @@ import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from functools import lru_cache
 from typing import Any
@@ -2683,6 +2683,236 @@ def create_sportybet_booking_code(request: str) -> str:
         return f"I couldn't create that SportyBet booking code right now: {exc}"
 
 
+def _sportybet_auto_candidates_for_fixture(
+    fixture: dict[str, Any],
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build model-supported candidate selections from one live SportyBet fixture."""
+    if (
+        context.get("projection") is None
+        or not _sportybet_context_has_enough_data(context)
+    ):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for market in fixture.get("markets") or []:
+        market_id = str(market.get("market_id") or "")
+        market_name = str(market.get("market_name") or "")
+        if market_id not in {"1", "10", "18", "29"}:
+            continue
+
+        specifier = market.get("specifier")
+        if market_id == "18":
+            line = _specifier_number(str(specifier or ""), "total")
+            if line is None or line < 1.5 or line > 3.5:
+                continue
+
+        for outcome in market.get("outcomes") or []:
+            if not outcome.get("is_active", False):
+                continue
+
+            odds = outcome.get("odds")
+            if not isinstance(odds, (int, float)):
+                continue
+            odds = float(odds)
+            if odds < 1.20 or odds > 3.50:
+                continue
+
+            selection = {
+                "event_id": fixture.get("event_id"),
+                "home_team": fixture.get("home_team"),
+                "away_team": fixture.get("away_team"),
+                "market_id": market_id,
+                "market_name": market_name,
+                "specifier": specifier,
+                "outcome_id": str(outcome.get("outcome_id") or ""),
+                "outcome_name": str(outcome.get("outcome_name") or ""),
+                "odds": odds,
+            }
+
+            probability, label = _sportybet_selection_model_support(
+                context,
+                selection,
+            )
+            if probability is None or probability < 0.55:
+                continue
+
+            candidates.append(
+                {
+                    **selection,
+                    "model_probability": probability,
+                    "model_label": label,
+                }
+            )
+
+    candidates.sort(
+        key=lambda item: (
+            float(item["model_probability"]),
+            float(item["odds"]),
+        ),
+        reverse=True,
+    )
+    return candidates
+
+
+def _sportybet_today_bounds_ms() -> tuple[int, int, str]:
+    """Return today's start/end in WAT (UTC+1) as epoch milliseconds."""
+    wat = timezone(timedelta(hours=1))
+    now = datetime.now(wat)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return (
+        int(start.timestamp() * 1000),
+        int(end.timestamp() * 1000),
+        start.date().isoformat(),
+    )
+
+
+def _build_model_ranked_sportybet_code(match_count: int) -> str:
+    """Build a non-staking SportyBet code from today's model-supported fixtures."""
+    match_count = max(1, min(int(match_count), 10))
+    start_ms, end_ms, date_text = _sportybet_today_bounds_ms()
+
+    fixtures = fetch_upcoming_fixtures(
+        market_ids=("1", "10", "18", "29"),
+        timeline_hours=48,
+        max_pages=20,
+    )
+    today = [
+        fixture
+        for fixture in fixtures
+        if start_ms <= int(fixture.get("start_ms") or 0) < end_ms
+        and str(fixture.get("match_status") or "Not start") == "Not start"
+        and _league_code(str(fixture.get("league") or "")) is not None
+    ]
+
+    if not today:
+        return (
+            f"I couldn't find any supported SportyBet fixtures for {date_text}. "
+            "Try another date or create a code from explicit selections."
+        )
+
+    # Keep this responsive. The fuller model is only run on a small set of
+    # current fixtures from competitions our structured data source supports.
+    today = today[:16]
+
+    def evaluate(fixture: dict[str, Any]) -> list[dict[str, Any]]:
+        home = str(fixture.get("home_team") or "")
+        away = str(fixture.get("away_team") or "")
+        if not home or not away:
+            return []
+        try:
+            context = _build_prediction_context(
+                home,
+                away,
+                known_fixture={"home": home, "away": away, "date": date_text},
+                recent_only=False,
+                prefer_season_only=True,
+            )
+            return _sportybet_auto_candidates_for_fixture(
+                fixture,
+                context,
+            )
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        fixture_candidates = list(executor.map(evaluate, today))
+
+    selected: list[dict[str, Any]] = []
+    for candidates in fixture_candidates:
+        if candidates:
+            selected.append(candidates[0])
+
+    selected.sort(
+        key=lambda item: (
+            float(item["model_probability"]),
+            float(item["odds"]),
+        ),
+        reverse=True,
+    )
+    selected = selected[:match_count]
+
+    if len(selected) < match_count:
+        return (
+            f"I found only {len(selected)} independently modelled SportyBet "
+            f"selection(s) meeting the current quality filters for {date_text}; "
+            f"{match_count} were requested. No booking code was created."
+        )
+
+    booking = create_booking(selected)
+    booked = booking.get("selections") or []
+
+    live_odds = [
+        float(item["odds"])
+        for item in booked
+        if isinstance(item.get("odds"), (int, float))
+        and float(item["odds"]) > 0
+    ]
+    combined = (
+        math.prod(live_odds)
+        if booked and len(live_odds) == len(booked)
+        else None
+    )
+
+    lines = [
+        f"Model-built SportyBet code: {booking.get('share_code')}",
+        f"Date: {date_text}",
+        f"Selections: {len(booked) or len(selected)}",
+    ]
+    if combined is not None:
+        lines.append(f"Combined odds: {combined:.2f}")
+
+    lines.extend(["", "Selections:"])
+    booked_by_event = {
+        str(item.get("event_id") or ""): item
+        for item in booked
+    }
+
+    for index, item in enumerate(selected, start=1):
+        live = booked_by_event.get(str(item.get("event_id") or ""), item)
+        odds = live.get("odds")
+        odds_text = (
+            f" @ {float(odds):.2f}"
+            if isinstance(odds, (int, float))
+            else ""
+        )
+        lines.append(
+            f"{index}. {item['home_team']} vs {item['away_team']} - "
+            f"{item['model_label']}{odds_text}"
+        )
+        lines.append(
+            f"   Independent model support: "
+            f"{item['model_probability'] * 100:.1f}%"
+        )
+
+    share_url = str(booking.get("share_url") or "").strip()
+    if share_url:
+        lines.extend(["", f"Share URL: {share_url}"])
+
+    lines.extend(
+        [
+            "",
+            "These selections were ranked by the experimental model from markets currently available on SportyBet. They are not guaranteed outcomes.",
+            "The code only prepares a betslip reservation. No wager or stake was submitted.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+@tool
+def build_model_ranked_sportybet_code(match_count: int = 3) -> str:
+    """Build a non-staking SportyBet code from today's highest model-supported selections."""
+    try:
+        return _build_model_ranked_sportybet_code(match_count)
+    except ValueError as exc:
+        return str(exc)
+    except SportyBetLookupError as exc:
+        return str(exc)
+    except Exception as exc:
+        return f"I couldn't build that SportyBet code right now: {exc}"
+
+
 @tool
 def search_betting_knowledge(question: str) -> str:
     """Explain football betting terms and market settlement using the local knowledge base."""
@@ -2829,6 +3059,7 @@ TOOLS = [
     format_prediction_for_platform,
     analyse_sportybet_booking_code,
     create_sportybet_booking_code,
+    build_model_ranked_sportybet_code,
     search_betting_knowledge,
     search_football_knowledge,
     get_league_fixtures,
@@ -2862,7 +3093,7 @@ Rules:
 4. Use live-data tools for fixtures, results, standings, scorers, players, and live scores.
 5. Use the match prediction tool when the user asks who is likely to win, the correct-score projection tool for exact-score requests, and the betting-market probability tool for markets such as 1X2, double chance, draw no bet, BTTS, totals, team totals, clean sheets, win to nil, Asian handicap, and correct score.
 6. Use the betting terminology knowledge-base tool when the user asks what a betting term or market means, including Asian handicap, double chance, draw no bet, BTTS, over/under, accumulators, push/void, and similar terms.
-7. Use the betting-platform formatting tool when the user asks for predictions formatted for SportyBet, Bet9ja, BetKing, MSport, 1xBet, or Betway. Use the SportyBet booking-code analysis tool when the user asks to load, check, review, or analyse an existing SportyBet code. Use the SportyBet booking-code creation tool only when the user explicitly asks to create/prepare a SportyBet share code from selections. Booking-code creation is a non-staking betslip reservation only; never claim a wager was placed and never submit a stake. The SportyBet web integration is undocumented and may change.
+7. Use the betting-platform formatting tool when the user asks for predictions formatted for SportyBet, Bet9ja, BetKing, MSport, 1xBet, or Betway. Use the SportyBet booking-code analysis tool when the user asks to load, check, review, or analyse an existing SportyBet code. Use the explicit SportyBet booking-code creation tool when the user supplies selections. Use the model-ranked SportyBet code tool only when the user explicitly asks the bot to build a code from today's games. Booking-code creation is a non-staking betslip reservation only; never claim a wager was placed and never submit a stake. The SportyBet web integration is undocumented and may change.
 8. Betting-market outputs are statistical probability estimates only. Never promise a guaranteed win, call a selection risk-free, or recommend a stake size or bankroll percentage.
 9. Keep WhatsApp responses concise, readable, and conversational.
 10. Use plain text only. Never use Markdown formatting markers such as asterisks, underscores, hash headers, or backticks. Use emojis and hyphen lists when useful.
@@ -2950,6 +3181,21 @@ def _direct_guarded_tool_response(message: str, user_id: str) -> str | None:
     """Route guarded factual intents directly to deterministic tools."""
     normalized = re.sub(r"\s+", " ", message.strip())
     lowered = normalized.casefold()
+
+    sportybet_auto_code_match = re.match(
+        r"^\s*(?:build|make|create|generate|prepare)\s+(?:me\s+)?(?:a\s+)?"
+        r"(?:(\d+)\s*[- ]?(?:match|leg)\s+)?sportybet\s+"
+        r"(?:(?:booking|share)\s+)?code\s+(?:for\s+)?today(?:'s)?\s*(?:games|matches)?[?.!]*\s*$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if sportybet_auto_code_match:
+        match_count = int(sportybet_auto_code_match.group(1) or 3)
+        return str(
+            build_model_ranked_sportybet_code.invoke(
+                {"match_count": match_count}
+            )
+        )
 
     sportybet_create_match = re.match(
         r"^\s*(?:create|make|generate|prepare)\s+(?:a\s+)?sportybet\s+"
@@ -3352,8 +3598,27 @@ def _send_whatsapp_message(to: str, body: str) -> None:
 
 def process_and_reply(message: str, sender: str) -> None:
     lowered_message = message.casefold()
-    if (
+    auto_code_request = (
         "sportybet" in lowered_message
+        and "code" in lowered_message
+        and "today" in lowered_message
+        and any(
+            lowered_message.lstrip().startswith(word)
+            for word in ("build", "create", "make", "generate", "prepare")
+        )
+    )
+    if auto_code_request:
+        try:
+            _send_whatsapp_message(
+                sender,
+                "I’m checking today’s SportyBet fixtures and ranking the supported markets with the independent model now.",
+            )
+        except Exception as exc:
+            print(f"Twilio acknowledgement error for {sender}: {exc}")
+
+    if (
+        not auto_code_request
+        and "sportybet" in lowered_message
         and "code" in lowered_message
         and any(
             lowered_message.lstrip().startswith(word)
