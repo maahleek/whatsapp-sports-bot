@@ -2,6 +2,7 @@ import math
 import os
 import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from datetime import datetime, timezone
 from threading import Lock
@@ -100,15 +101,8 @@ def _league_code(league_name: str) -> str | None:
 
 
 def _team_record(team_name: str) -> tuple[str, str]:
-    data = _safe_get_json(
-        f"{SPORTSDB_BASE_URL}/searchteams.php",
-        params={"t": team_name},
-    )
-    teams = data.get("teams") or []
-    if not teams:
-        raise ValueError(f"Team '{team_name}' not found.")
-    team = teams[0]
-    return str(team["idTeam"]), str(team["strTeam"])
+    profile = _team_profile(team_name)
+    return profile["id"], profile["name"]
 
 
 def _recent_events(team_name: str, limit: int = 5) -> tuple[str, list[dict[str, Any]]]:
@@ -208,6 +202,7 @@ def _normalize_team_name(name: str) -> str:
     return " ".join(tokens)
 
 
+@lru_cache(maxsize=512)
 def _team_profile(team_name: str) -> dict[str, str]:
     data = _safe_get_json(
         f"{SPORTSDB_BASE_URL}/searchteams.php",
@@ -862,19 +857,26 @@ def _last_matchup(user_id: str) -> tuple[str, str] | None:
     with _MATCHUP_CONTEXT_LOCK:
         return _LAST_MATCHUPS.get(user_id)
 
-def _build_prediction_context(team1: str, team2: str) -> dict[str, Any]:
-    """Gather structured season/form data, fixture venue, and score projection."""
+def _build_prediction_context(
+    team1: str,
+    team2: str,
+    *,
+    known_fixture: dict[str, str] | None = None,
+    recent_only: bool = False,
+) -> dict[str, Any]:
+    """Gather performance data, fixture venue, and score projection."""
     first_season = second_season = None
     first_recent = second_recent = None
 
-    try:
-        first_season = _season_team_summary(team1)
-    except Exception:
-        pass
-    try:
-        second_season = _season_team_summary(team2)
-    except Exception:
-        pass
+    if not recent_only:
+        try:
+            first_season = _season_team_summary(team1)
+        except Exception:
+            pass
+        try:
+            second_season = _season_team_summary(team2)
+        except Exception:
+            pass
     try:
         first_recent = _form_summary(team1)
     except Exception:
@@ -890,11 +892,12 @@ def _build_prediction_context(team1: str, team2: str) -> dict[str, Any]:
     first_name = str((first_season or first_recent or {"team": team1})["team"])
     second_name = str((second_season or second_recent or {"team": team2})["team"])
 
-    fixture = None
-    try:
-        fixture = _find_upcoming_fixture(first_name, second_name)
-    except Exception:
-        fixture = None
+    fixture = known_fixture
+    if fixture is None:
+        try:
+            fixture = _find_upcoming_fixture(first_name, second_name)
+        except Exception:
+            fixture = None
 
     first_is_home: bool | None = None
     venue_note = "No upcoming head-to-head fixture was found, so no home advantage was applied."
@@ -1571,6 +1574,55 @@ def _settlement_support(settlement: dict[str, float]) -> float:
     )
 
 
+def _sportybet_market_can_model(selection: dict[str, Any]) -> bool:
+    """Return False before any sports API calls for markets this model cannot support."""
+    market = str(selection.get("market_name") or "").casefold().strip()
+    market_id = str(selection.get("market_id") or "")
+
+    unsupported_scope_terms = (
+        "corner",
+        "1st half",
+        "first half",
+        "2nd half",
+        "second half",
+        "both halves",
+        "either half",
+        "player",
+        "card",
+        "booking",
+        "shots",
+    )
+    if any(term in market for term in unsupported_scope_terms):
+        return False
+
+    if market_id in {"1", "10", "11", "16", "18", "23", "24", "29", "45"}:
+        return True
+
+    supported_terms = (
+        "1x2",
+        "match result",
+        "double chance",
+        "draw no bet",
+        "gg/ng",
+        "both teams to score",
+        "btts",
+        "over/under",
+        "total goals",
+        "asian handicap",
+        "correct score",
+    )
+    if any(term in market for term in supported_terms):
+        return True
+
+    if re.search(
+        r"(?:home(?: team)?|away(?: team)?)\s+or\s+over\s+[0-9]+(?:\.[0-9]+)?",
+        market,
+    ):
+        return True
+
+    return False
+
+
 def _sportybet_selection_model_support(
     context: dict[str, Any],
     selection: dict[str, Any],
@@ -1800,6 +1852,43 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
 
         counts = {"higher": 0, "moderate": 0, "lower": 0, "unmodelled": 0}
 
+        def evaluate_selection(selection: dict[str, Any]) -> dict[str, Any]:
+            market_name = str(selection.get("market_name") or "Unknown market")
+            if not _sportybet_market_can_model(selection):
+                return {"probability": None, "label": market_name}
+
+            home = str(selection.get("home_team") or "").strip()
+            away = str(selection.get("away_team") or "").strip()
+            if not home or not away:
+                return {"probability": None, "label": market_name}
+
+            try:
+                # SportyBet already tells us the real home/away order, so avoid
+                # extra fixture-discovery requests. Recent-only mode keeps a
+                # large booking-code analysis responsive and avoids dozens of
+                # standings requests.
+                context = _build_prediction_context(
+                    home,
+                    away,
+                    known_fixture={"home": home, "away": away, "date": ""},
+                    recent_only=True,
+                )
+                if context.get("projection") is None:
+                    return {"probability": None, "label": market_name}
+
+                probability, label = _sportybet_selection_model_support(
+                    context,
+                    selection,
+                )
+                return {"probability": probability, "label": label}
+            except Exception:
+                return {"probability": None, "label": market_name}
+
+        # Network-bound team lookups are independent. A small worker pool
+        # dramatically reduces large-slip latency without flooding providers.
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            evaluations = list(executor.map(evaluate_selection, selections))
+
         for index, selection in enumerate(selections, start=1):
             home = str(selection.get("home_team") or "Home")
             away = str(selection.get("away_team") or "Away")
@@ -1813,19 +1902,9 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
             if isinstance(odds, (int, float)):
                 lines.append(f"- SportyBet odds: {odds:.2f}")
 
-            try:
-                context = _build_prediction_context(home, away)
-                if context.get("projection") is None:
-                    probability = None
-                    label = market_name
-                else:
-                    probability, label = _sportybet_selection_model_support(
-                        context,
-                        selection,
-                    )
-            except Exception:
-                probability = None
-                label = market_name
+            evaluation = evaluations[index - 1]
+            probability = evaluation["probability"]
+            label = evaluation["label"]
 
             if probability is None:
                 counts["unmodelled"] += 1
@@ -1853,6 +1932,7 @@ def analyse_sportybet_booking_code(booking_code: str) -> str:
                 f"- Lower support: {counts['lower']}",
                 f"- Not modelled: {counts['unmodelled']}",
                 "",
+                "Large slips use a fast recent-form scoring comparison and SportyBet's known home/away order; regular single-match predictions still use the fuller season + recent-form model.",
                 "This is an experimental read-only lookup of SportyBet's undocumented website endpoint. It does not place or submit a wager.",
                 "Model probabilities are estimates, not guaranteed outcomes or betting advice.",
             ]
