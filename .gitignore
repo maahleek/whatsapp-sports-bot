@@ -1,7 +1,12 @@
 .env
+.env.*
+!.env.example
 venv/
-memory.db
-football_db/
+.venv/
 __pycache__/
 *.pyc
-.env.local
+.pytest_cache/
+memory.db
+memory.db-*
+football_db/
+.DS_Store
