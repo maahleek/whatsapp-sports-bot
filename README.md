@@ -290,6 +290,8 @@ SportyBet parser tests are included and do not make live network requests:
 python test_sportybet.py
 ```
 
+The same compile and test suite also runs in GitHub Actions on pushes and pull requests.
+
 ## Portfolio positioning
 
 This project demonstrates:
